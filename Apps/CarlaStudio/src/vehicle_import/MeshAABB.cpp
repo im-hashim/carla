@@ -67,17 +67,32 @@ MeshAABB parseOBJ(const QString &path) {
   QFile f(path);
   if (!f.open(QIODevice::ReadOnly | QIODevice::Text)) return bb;
   QTextStream in(&f);
+  static const QRegularExpression kWs("\\s+");
   while (!in.atEnd()) {
     const QString line = in.readLine().trimmed();
-    if (!line.startsWith(QLatin1String("v ")) &&
-        !line.startsWith(QLatin1String("v\t"))) continue;
-    const QStringList tok = line.split(QRegularExpression("\\s+"), Qt::SkipEmptyParts);
-    if (tok.size() < 4) continue;
-    bool ok1, ok2, ok3;
-    const float x = tok[1].toFloat(&ok1);
-    const float y = tok[2].toFloat(&ok2);
-    const float z = tok[3].toFloat(&ok3);
-    if (ok1 && ok2 && ok3) bb.feed(x, y, z);
+    if (line.startsWith(QLatin1String("v ")) || line.startsWith(QLatin1String("v\t"))) {
+      const QStringList tok = line.split(kWs, Qt::SkipEmptyParts);
+      if (tok.size() >= 4) {
+        bool ok1, ok2, ok3;
+        const float x = tok[1].toFloat(&ok1);
+        const float y = tok[2].toFloat(&ok2);
+        const float z = tok[3].toFloat(&ok3);
+        if (ok1 && ok2 && ok3) {
+          bb.feed(x, y, z);
+          ++bb.vertexCount;
+        }
+      }
+    } else if (line.startsWith(QLatin1String("vn ")) || line.startsWith(QLatin1String("vn\t"))) {
+      ++bb.normalsCount;
+    } else if (line.startsWith(QLatin1String("vt ")) || line.startsWith(QLatin1String("vt\t"))) {
+      bb.hasUVs = true;
+    } else if (line.startsWith(QLatin1String("f ")) || line.startsWith(QLatin1String("f\t"))) {
+      const QStringList tok = line.split(kWs, Qt::SkipEmptyParts);
+      if (tok.size() >= 4) ++bb.faceCount;
+      else                 ++bb.malformedFaceLines;
+    } else if (line.startsWith(QLatin1String("mtllib"))) {
+      ++bb.mtlRefs;
+    }
   }
   return bb;
 }

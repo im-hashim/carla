@@ -22,6 +22,13 @@ struct MeshAABB {
   int   upAxis      = 2;
   int   forwardAxis = 0;
 
+  int  vertexCount        = 0;
+  int  faceCount          = 0;
+  int  malformedFaceLines = 0;
+  int  normalsCount       = 0;
+  int  mtlRefs            = 0;
+  bool hasUVs             = false;
+
   void feed(float x, float y, float z);
   void detectConventions(const QString &ext);
   void toUE(float &xLo, float &xHi,

@@ -1,6 +1,7 @@
-// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
-// de Barcelona (UAB). This work is licensed under the terms of the MIT license.
-// For a copy, see <https://opensource.org/licenses/MIT>.
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB). This work is licensed under the terms of the MIT license. For a copy, see <https://opensource.org/licenses/MIT>.
+
+
+
 
 #include "VehicleImporter.h"
 #include "USDImporterWidget.h"
@@ -24,26 +25,263 @@
 #include "Engine/StaticMesh.h"
 #include "Engine/SkeletalMesh.h"
 #include "PhysicsEngine/PhysicsAsset.h"
+#include "PhysicsEngine/SkeletalBodySetup.h"
+#include "PhysicsEngine/BodySetup.h"
+#include "PhysicsEngine/AggregateGeom.h"
+#include "Components/SkeletalMeshComponent.h"
 #include "Factories/FbxImportUI.h"
 #include "AssetImportTask.h"
 #include "AssetToolsModule.h"
 #include "IAssetTools.h"
+#include "InterchangeManager.h"
+#include "InterchangeProjectSettings.h"
+#include "InterchangeGenericAssetsPipeline.h"
+#include "InterchangeGenericMaterialPipeline.h"
 #include "AssetRegistry/AssetRegistryModule.h"
 #include "EditorAssetLibrary.h"
 #include "Kismet2/KismetEditorUtilities.h"
 #include "ChaosVehicleWheel.h"
+#include "ChaosWheeledVehicleMovementComponent.h"
+#include "Carla/Vehicle/CarlaWheeledVehicle.h"
 #include "Factories/BlueprintFactory.h"
 #include "Engine/Blueprint.h"
+#include "Engine/BlueprintGeneratedClass.h"
+#include "HAL/FileManager.h"
+#include "Misc/Paths.h"
+#include "Misc/PackageName.h"
+#include "UObject/SavePackage.h"
+#include "GameFramework/Actor.h"
+#include "Kismet2/BlueprintEditorUtils.h"
+#include "Runtime/Launch/Resources/Version.h"
 #include <util/ue-header-guard-end.h>
 
-// Port CarlaStudio connects to.
 static constexpr int32 GImporterPort = 18583;
-// Max message size accepted (10 MB — large enough for any vehicle spec JSON).
+
 static constexpr int32 GMaxMessageBytes = 10 * 1024 * 1024;
 
-// ---------------------------------------------------------------------------
-// Static members
-// ---------------------------------------------------------------------------
+namespace
+{
+
+  
+
+  static constexpr float kChaosWheelRadiusFloorCm = 18.f;
+  static constexpr float kStockWheelShapeRadiusCm = 35.f;
+  static constexpr float kStockWheelShapeWidthCm  = 25.f;
+
+  static UStaticMesh* MakeShrunkWheelShape(
+      const FString& VehicleContentPath,
+      const FString& Suffix,
+      float RadiusCm,
+      float WidthCm)
+  {
+    if (RadiusCm >= kChaosWheelRadiusFloorCm)
+      return nullptr;
+
+    static const TCHAR* const kSrcPath =
+      TEXT("/Game/Carla/Blueprints/Vehicles/Wheel_Shape.Wheel_Shape");
+    UStaticMesh* Src = LoadObject<UStaticMesh>(nullptr, kSrcPath);
+    if (!Src)
+      return nullptr;
+
+    const FString DstPath = VehicleContentPath / FString::Printf(
+        TEXT("WheelShape_%s"), *Suffix);
+    UEditorAssetLibrary::DeleteAsset(DstPath);
+    UObject* DupObj = UEditorAssetLibrary::DuplicateAsset(Src->GetPathName(), DstPath);
+    UStaticMesh* Dup = Cast<UStaticMesh>(DupObj);
+    if (!Dup || Dup->GetNumSourceModels() == 0)
+      return nullptr;
+
+    const float SafeR = FMath::Max(RadiusCm, 1.f);
+    const float SafeW = FMath::Max(WidthCm,  1.f);
+    const float ScaleR = SafeR / kStockWheelShapeRadiusCm;
+    const float ScaleW = SafeW / kStockWheelShapeWidthCm;
+
+    FStaticMeshSourceModel& SM = Dup->GetSourceModel(0);
+    SM.BuildSettings.BuildScale3D = FVector(ScaleW, ScaleR, ScaleR);
+    Dup->Build(false);
+    Dup->MarkPackageDirty();
+    return Dup;
+  }
+
+  
+
+  
+  
+  static UBlueprint* CreateGraftedBlueprint(
+      UWorld* World,
+      UClass* StockParent,
+      UStaticMesh* BodyMesh,
+      const FWheelTemplates& WheelTemplates,
+      const FString& DestPath)
+  {
+    if (!World || !StockParent || !BodyMesh) return nullptr;
+    AActor* Template = World->SpawnActor<AActor>(StockParent);
+    if (!Template) return nullptr;
+
+    
+    
+    if (ACarlaWheeledVehicle* CarlaVehicle = Cast<ACarlaWheeledVehicle>(Template))
+    {
+      if (UChaosWheeledVehicleMovementComponent* MC =
+              CarlaVehicle->FindComponentByClass<UChaosWheeledVehicleMovementComponent>())
+      {
+        MC->WheelSetups.Empty();
+        const TPair<FName, TSubclassOf<UChaosVehicleWheel>> Wheels[4] = {
+          { FName(TEXT("Wheel_Front_Left")),  WheelTemplates.WheelFL },
+          { FName(TEXT("Wheel_Front_Right")), WheelTemplates.WheelFR },
+          { FName(TEXT("Wheel_Rear_Left")),   WheelTemplates.WheelRL },
+          { FName(TEXT("Wheel_Rear_Right")),  WheelTemplates.WheelRR },
+        };
+        for (const auto& W : Wheels)
+        {
+          FChaosWheelSetup S;
+          S.BoneName   = W.Key;
+          S.WheelClass = W.Value;
+          MC->WheelSetups.Add(S);
+        }
+        UE_LOG(LogCarlaTools, Display,
+               TEXT("VI.Graft: WheelSetups populated with 4 wheel classes"));
+      }
+      else
+      {
+        UE_LOG(LogCarlaTools, Warning,
+               TEXT("VI.Graft: no UChaosWheeledVehicleMovementComponent on parent — "
+                    "WheelSetups not populated; BP will crash in BeginPlay."));
+      }
+    }
+
+    UStaticMeshComponent* BodyComp = nullptr;
+    float BestVol = 0.f;
+    TArray<UStaticMeshComponent*> SMs;
+    Template->GetComponents(SMs);
+    for (UStaticMeshComponent* C : SMs)
+    {
+      UStaticMesh* CurMesh = C->GetStaticMesh();
+      if (!CurMesh) continue;
+      const FBoxSphereBounds B = CurMesh->GetBounds();
+      const float Vol = B.BoxExtent.X * B.BoxExtent.Y * B.BoxExtent.Z;
+      if (Vol > BestVol) { BestVol = Vol; BodyComp = C; }
+    }
+    if (BodyComp)
+    {
+      BodyComp->SetStaticMesh(BodyMesh);
+      UE_LOG(LogCarlaTools, Display,
+             TEXT("VI.Graft: replaced body StaticMesh on '%s' with %s"),
+             *BodyComp->GetName(), *BodyMesh->GetName());
+    }
+    else
+    {
+      
+      UStaticMeshComponent* NewBody = NewObject<UStaticMeshComponent>(
+          Template, UStaticMeshComponent::StaticClass(), TEXT("Body"));
+      NewBody->SetStaticMesh(BodyMesh);
+      NewBody->SetMobility(EComponentMobility::Movable);
+      if (USceneComponent* Root = Template->GetRootComponent())
+        NewBody->AttachToComponent(Root, FAttachmentTransformRules::KeepRelativeTransform);
+      else
+        Template->SetRootComponent(NewBody);
+      NewBody->RegisterComponent();
+      Template->AddInstanceComponent(NewBody);
+      UE_LOG(LogCarlaTools, Display,
+             TEXT("VI.Graft: parent had no StaticMesh body — added new 'Body' component with %s"),
+             *BodyMesh->GetName());
+    }
+
+    FKismetEditorUtilities::FCreateBlueprintFromActorParams P;
+    P.bReplaceActor       = false;
+    P.bKeepMobility       = true;
+    P.bDeferCompilation   = false;
+    P.bOpenBlueprint      = false;
+    P.ParentClassOverride = StockParent;
+    UBlueprint* BP = FKismetEditorUtilities::CreateBlueprintFromActor(DestPath, Template, P);
+    if (BP)
+    {
+      if (UPackage* Pkg = BP->GetOutermost())
+      {
+        Pkg->SetDirtyFlag(true);
+        const FString FilePath = FPackageName::LongPackageNameToFilename(
+            Pkg->GetName(), FPackageName::GetAssetPackageExtension());
+        FSavePackageArgs SaveArgs;
+        SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+        SaveArgs.SaveFlags     = SAVE_NoError;
+        SaveArgs.Error         = GError;
+        UPackage::SavePackage(Pkg, BP, *FilePath, SaveArgs);
+      }
+    }
+    Template->Destroy();
+    return BP;
+  }
+
+  static void ApplyChassisAabbResize(
+      UPhysicsAsset* PA,
+      const FVehicleImportSpec& Spec,
+      bool bHaveAabb)
+  {
+    if (!PA) return;
+
+    const float MinWheelR = FMath::Min(
+        FMath::Min(Spec.WheelFL.Radius, Spec.WheelFR.Radius),
+        FMath::Min(Spec.WheelRL.Radius, Spec.WheelRR.Radius));
+
+    auto WheelRadiusForBone = [&](const FName& Bone) -> float {
+      const FString S = Bone.ToString();
+      if (S.Contains(TEXT("Front_Left")))  return Spec.WheelFL.Radius;
+      if (S.Contains(TEXT("Front_Right"))) return Spec.WheelFR.Radius;
+      if (S.Contains(TEXT("Rear_Left")))   return Spec.WheelRL.Radius;
+      if (S.Contains(TEXT("Rear_Right")))  return Spec.WheelRR.Radius;
+      return 0.f;
+    };
+
+    for (USkeletalBodySetup* BS : PA->SkeletalBodySetups)
+    {
+      if (!BS) continue;
+      const FString BoneStr = BS->BoneName.ToString();
+      FKAggregateGeom& Geom = BS->AggGeom;
+      if (BoneStr == TEXT("Vehicle_Base"))
+      {
+        if (bHaveAabb)
+        {
+          const float DX = Spec.ChassisXMax - Spec.ChassisXMin;
+          const float DY = Spec.ChassisYMax - Spec.ChassisYMin;
+          const float DZ = Spec.ChassisZMax - Spec.ChassisZMin;
+          const float CX = 0.5f * (Spec.ChassisXMin + Spec.ChassisXMax);
+          const float CY = 0.5f * (Spec.ChassisYMin + Spec.ChassisYMax);
+          const float CZ = MinWheelR + 0.5f * DZ + 1.0f;
+          Geom.EmptyElements();
+          FKBoxElem Box;
+          Box.X = DX; Box.Y = DY; Box.Z = DZ;
+          Box.Center = FVector(CX, CY, CZ);
+          Geom.BoxElems.Add(Box);
+        }
+        BS->DefaultInstance.LinearDamping  = 0.f;
+        BS->DefaultInstance.AngularDamping = 0.f;
+      }
+      else
+      {
+        const float WR = WheelRadiusForBone(BS->BoneName);
+        if (WR > 0.f)
+        {
+          if (bHaveAabb)
+          {
+            Geom.EmptyElements();
+            FKSphereElem Sph;
+            Sph.Radius = WR;
+            Sph.Center = FVector::ZeroVector;
+            Geom.SphereElems.Add(Sph);
+          }
+          BS->PhysicsType            = PhysType_Kinematic;
+          BS->CollisionReponse       = EBodyCollisionResponse::BodyCollision_Disabled;
+          BS->DefaultInstance.LinearDamping  = 0.f;
+          BS->DefaultInstance.AngularDamping = 0.f;
+        }
+      }
+    }
+    PA->Modify();
+    PA->MarkPackageDirty();
+  }
+}
+
+
 
 FVehicleImporterServer* UVehicleImporter::ServerRunnable = nullptr;
 FRunnableThread*        UVehicleImporter::ServerThread   = nullptr;
@@ -75,9 +313,7 @@ void UVehicleImporter::StopServer()
   ServerRunnable = nullptr;
 }
 
-// ---------------------------------------------------------------------------
-// FVehicleImporterServer
-// ---------------------------------------------------------------------------
+
 
 FVehicleImporterServer::FVehicleImporterServer()  = default;
 FVehicleImporterServer::~FVehicleImporterServer() = default;
@@ -138,9 +374,7 @@ void FVehicleImporterServer::Stop()
   }
 }
 
-// ---------------------------------------------------------------------------
-// Protocol: 4-byte little-endian length prefix + UTF-8 JSON body
-// ---------------------------------------------------------------------------
+
 
 static bool RecvAll(FSocket* S, uint8* Buf, int32 Len)
 {
@@ -170,7 +404,7 @@ static bool SendAll(FSocket* S, const uint8* Buf, int32 Len)
 
 void FVehicleImporterServer::ServeClient(FSocket* Client)
 {
-  // Read 4-byte length header.
+  
   uint8 LenBuf[4];
   if (!RecvAll(Client, LenBuf, 4))
     return;
@@ -195,11 +429,9 @@ void FVehicleImporterServer::ServeClient(FSocket* Client)
   const FString JsonStr = FString(UTF8_TO_TCHAR(
     reinterpret_cast<const ANSICHAR*>(Body.GetData())));
 
-  // Multiplex on the JSON `action` field: "spawn" → drop the named asset
-  // into the editor world; anything else (or absent) → the original
-  // import flow. Any new game-thread work goes through the same FTSTicker
-  // dispatch as ProcessSpec — see the comment block in ProcessSpec for
-  // why this dance is needed (TaskGraph RecursionGuard otherwise).
+  
+
+  
   FString Response;
   TSharedPtr<FJsonObject> Root;
   TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
@@ -251,7 +483,6 @@ void FVehicleImporterServer::ServeClient(FSocket* Client)
     }
   }
 
-  // Send length-prefixed response.
   FTCHARToUTF8 ResponseUTF8(*Response);
   const int32 RespLen = ResponseUTF8.Length();
   uint8 RespLenBuf[4] = {
@@ -264,9 +495,7 @@ void FVehicleImporterServer::ServeClient(FSocket* Client)
   SendAll(Client, reinterpret_cast<const uint8*>(ResponseUTF8.Get()), RespLen);
 }
 
-// ---------------------------------------------------------------------------
-// JSON helpers
-// ---------------------------------------------------------------------------
+
 
 static float JF(const TSharedPtr<FJsonObject>& O, const FString& K, float Def = 0.f)
 {
@@ -293,10 +522,23 @@ static void ParseWheel(const TSharedPtr<FJsonObject>& Root,
   Out.Y              = JF(W, "y");
   Out.Z              = JF(W, "z");
   Out.Radius         = JF(W, "radius",           33.f);
+  Out.Width          = JF(W, "width",            22.f);
   Out.MaxSteerAngle  = JF(W, "max_steer_angle",  70.f);
   Out.MaxBrakeTorque = JF(W, "max_brake_torque", 1500.f);
   Out.SuspMaxRaise   = JF(W, "susp_max_raise",   10.f);
   Out.SuspMaxDrop    = JF(W, "susp_max_drop",    10.f);
+}
+
+static void ParseChassisAabb(const TSharedPtr<FJsonObject>& Root, FVehicleImportSpec& Out)
+{
+  TSharedPtr<FJsonObject> A = JO(Root, "chassis_aabb_cm");
+  if (!A) return;
+  Out.ChassisXMin = JF(A, "x_min");  Out.ChassisXMax = JF(A, "x_max");
+  Out.ChassisYMin = JF(A, "y_min");  Out.ChassisYMax = JF(A, "y_max");
+  Out.ChassisZMin = JF(A, "z_min");  Out.ChassisZMax = JF(A, "z_max");
+  Out.HasChassisAabb = (Out.ChassisXMax > Out.ChassisXMin)
+                    && (Out.ChassisYMax > Out.ChassisYMin)
+                    && (Out.ChassisZMax > Out.ChassisZMin);
 }
 
 bool FVehicleImporterServer::ParseSpec(const FString& Json, FVehicleImportSpec& Out)
@@ -326,6 +568,7 @@ bool FVehicleImporterServer::ParseSpec(const FString& Json, FVehicleImportSpec& 
   ParseWheel(Root, TEXT("wheel_fr"), Out.WheelFR);
   ParseWheel(Root, TEXT("wheel_rl"), Out.WheelRL);
   ParseWheel(Root, TEXT("wheel_rr"), Out.WheelRR);
+  ParseChassisAabb(Root, Out);
 
   return !Out.VehicleName.IsEmpty() && !Out.MeshFilePath.IsEmpty();
 }
@@ -343,13 +586,10 @@ FString FVehicleImporterServer::MakeResponse(bool bOk, const FString& Path, cons
   return Out;
 }
 
-// ---------------------------------------------------------------------------
-// Asset creation (runs on Game Thread)
-// ---------------------------------------------------------------------------
 
-// Sanitize an arbitrary string into a valid UE asset / package object name.
-// UE only allows [A-Za-z0-9_]; anything else (spaces, '+', '-', '.', etc.)
-// becomes '_'. Leading digits are also forbidden, so prefix if needed.
+
+
+
 static FString SanitizeAssetName(const FString& In)
 {
   FString Out;
@@ -374,31 +614,70 @@ static UStaticMesh* ImportStaticMesh(const FString& FilePath,
   Task->Filename        = FilePath;
   Task->DestinationPath = ContentPath;
   Task->DestinationName = SanitizeAssetName(AssetName);
-  // Don't save during import. Saving while we're holding the game-thread
-  // tick (we run ProcessSpec from FTSTicker) triggers source-control
-  // modals + a save dialog cascade that hangs the editor. The asset is
-  // saved separately at the very end of the import, after all the
-  // wheel/vehicle BPs have been built.
+
+  
+
   Task->bSave           = false;
   Task->bAutomated      = true;
   Task->bReplaceExisting = true;
+
+  UInterchangeGenericAssetsPipeline* Pipeline = nullptr;
+  if (const UInterchangeProjectSettings* Settings = GetDefault<UInterchangeProjectSettings>())
+  {
+    if (UClass* PipelineClass = Settings->GenericPipelineClass.LoadSynchronous())
+    {
+      Pipeline = NewObject<UInterchangeGenericAssetsPipeline>(GetTransientPackage(), PipelineClass);
+    }
+  }
+  if (!Pipeline)
+  {
+    Pipeline = NewObject<UInterchangeGenericAssetsPipeline>(GetTransientPackage());
+  }
+  Pipeline->ClearFlags(EObjectFlags::RF_Standalone | EObjectFlags::RF_Public);
+  if (Pipeline->MaterialPipeline)
+  {
+    Pipeline->MaterialPipeline->bImportMaterials = true;
+    Pipeline->MaterialPipeline->bIdentifyDuplicateMaterials = true;
+    Pipeline->MaterialPipeline->bCreateMaterialInstanceForParent = false;
+    Pipeline->MaterialPipeline->MaterialImport = EInterchangeMaterialImportOption::ImportAsMaterials;
+  }
+
+  UInterchangePipelineStackOverride* StackOverride = NewObject<UInterchangePipelineStackOverride>(GetTransientPackage());
+  StackOverride->AddPipeline(Pipeline);
+  Task->Options = StackOverride;
 
   IAssetTools& AssetTools =
     FModuleManager::GetModuleChecked<FAssetToolsModule>("AssetTools").Get();
   AssetTools.ImportAssetTasks({ Task });
 
+  
+
+  
+  
   TArray<UObject*> Imported = Task->GetObjects();
   if (Imported.Num() == 0)
     return nullptr;
-  UStaticMesh* Mesh = Cast<UStaticMesh>(Imported[0]);
-  if (!Mesh) return nullptr;
+  UStaticMesh* Mesh = nullptr;
+  for (UObject* Obj : Imported)
+  {
+    if (UStaticMesh* SM = Cast<UStaticMesh>(Obj))
+    {
+      Mesh = SM;
+      break;
+    }
+  }
+  if (!Mesh)
+  {
+    UE_LOG(LogCarlaTools, Warning,
+           TEXT("VI.ImportStaticMesh: Interchange returned %d object(s) but "
+                "none was a UStaticMesh"), Imported.Num());
+    return nullptr;
+  }
 
-  // Unit scaling is done by CarlaStudio at the source (it pre-scales the
-  // OBJ vertices before sending the file path) so MeshDescription and
-  // RenderData bounds stay in sync. Force BuildScale3D back to (1,1,1)
-  // explicitly — UE preserves the previous BuildSettings on re-import, so
-  // an asset that was previously imported with a 100× scale will keep
-  // multiplying. Resetting here makes re-imports idempotent.
+  
+
+  
+  
   if (Mesh->GetNumSourceModels() > 0)
   {
     FStaticMeshSourceModel& SM = Mesh->GetSourceModel(0);
@@ -415,34 +694,79 @@ static UStaticMesh* ImportStaticMesh(const FString& FilePath,
 static TSubclassOf<UChaosVehicleWheel> CreateWheelBlueprint(
     const FString& ContentPath,
     const FString& Name,
-    const FWheelImportSpec& W)
+    const FString& Suffix,
+    const FWheelImportSpec& W,
+    UStaticMesh* ShrunkShapeOverride)
 {
   IAssetTools& AssetTools =
     FModuleManager::GetModuleChecked<FAssetToolsModule>("AssetTools").Get();
 
   UBlueprintFactory* Factory = NewObject<UBlueprintFactory>();
-  Factory->ParentClass = UChaosVehicleWheel::StaticClass();
+
+  
+
+  
+
+  
+
+  const FString WheelTemplatePath = FString::Printf(
+    TEXT("/Game/Carla/Blueprints/Vehicles/Mustang/BP_Mustang_%s.BP_Mustang_%s_C"),
+    *Suffix, *Suffix);
+  UClass* WheelTemplate = LoadObject<UClass>(nullptr, *WheelTemplatePath);
+  if (!WheelTemplate)
+  {
+    UE_LOG(LogCarlaTools, Warning,
+           TEXT("VI.CreateWheel: BP_Mustang_%s not loadable at %s — "
+                "falling back to UChaosVehicleWheel; throttle won't drive wheels."),
+           *Suffix, *WheelTemplatePath);
+    WheelTemplate = UChaosVehicleWheel::StaticClass();
+  }
+  Factory->ParentClass = WheelTemplate;
 
   UObject* Asset = AssetTools.CreateAsset(Name, ContentPath,
                                           UBlueprint::StaticClass(), Factory);
   UBlueprint* BP = Cast<UBlueprint>(Asset);
   if (!BP || !BP->GeneratedClass) return nullptr;
 
-  // BP factory does an initial compile inside CreateAsset, so GeneratedClass
-  // is already valid. Just patch the CDO with our wheel parameters and skip
-  // the explicit CompileBlueprint recompile — that call needs other game-
-  // thread tasks to pump (shader/asset registry/save callbacks) to make
-  // progress, which we can't provide while we're holding the FTSTicker
-  // callback open.
+  
+
+  
+  
   UChaosVehicleWheel* Defaults =
     Cast<UChaosVehicleWheel>(BP->GeneratedClass->ClassDefaultObject);
   if (Defaults)
   {
     Defaults->WheelRadius        = W.Radius;
+    Defaults->WheelWidth         = W.Width;
     Defaults->MaxSteerAngle      = W.MaxSteerAngle;
     Defaults->MaxBrakeTorque     = W.MaxBrakeTorque;
     Defaults->SuspensionMaxRaise = W.SuspMaxRaise;
     Defaults->SuspensionMaxDrop  = W.SuspMaxDrop;
+
+    
+
+    const bool bIsFront = Suffix.StartsWith(TEXT("F"));
+
+    
+    Defaults->bAffectedByEngine    = true;
+    Defaults->bAffectedBySteering  = bIsFront;
+    Defaults->bAffectedByHandbrake = !bIsFront;
+    Defaults->bAffectedByBrake     = true;
+    static const TCHAR* const kWheelShapePath =
+      TEXT("/Game/Carla/Blueprints/Vehicles/Wheel_Shape.Wheel_Shape");
+    UStaticMesh* Shape = ShrunkShapeOverride
+        ? ShrunkShapeOverride
+        : LoadObject<UStaticMesh>(nullptr, kWheelShapePath);
+    if (Shape)
+    {
+      Defaults->CollisionMesh = Shape;
+    }
+    else
+    {
+      UE_LOG(LogCarlaTools, Warning,
+             TEXT("VI.CreateWheel: Wheel_Shape not loadable at %s — wheel BP "
+                  "will spawn-fail in CARLA."), kWheelShapePath);
+    }
   }
   return TSubclassOf<UChaosVehicleWheel>(BP->GeneratedClass);
 }
@@ -452,33 +776,83 @@ FString FVehicleImporterServer::ProcessSpec(const FVehicleImportSpec& Spec)
   UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: enter (vehicle=%s mesh=%s)"),
          *Spec.VehicleName, *Spec.MeshFilePath);
 
-  // Resolve content path: ensure it ends without slash.
   FString ContentRoot = Spec.ContentPath;
   if (ContentRoot.EndsWith(TEXT("/")))
     ContentRoot.RemoveFromEnd(TEXT("/"));
   const FString VehicleContentPath = ContentRoot / Spec.VehicleName;
 
-  // 1. Import body static mesh.
+  
+
+  
+  if (UEditorAssetLibrary::DoesDirectoryExist(VehicleContentPath))
+  {
+    UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: %s already exists — deleting before re-import"),
+           *VehicleContentPath);
+    UEditorAssetLibrary::DeleteDirectory(VehicleContentPath);
+  }
+
+  
+
+  
+  
+  FString MeshFilePathToImport = Spec.MeshFilePath;
+  {
+    const FString OrigName = FPaths::GetCleanFilename(Spec.MeshFilePath);
+    bool bNeedsSanitize = false;
+    for (TCHAR C : OrigName) {
+      const bool bSafe = (C >= 'A' && C <= 'Z') || (C >= 'a' && C <= 'z')
+                      || (C >= '0' && C <= '9') || C == '_' || C == '-' || C == '.';
+      if (!bSafe) { bNeedsSanitize = true; break; }
+    }
+    if (bNeedsSanitize)
+    {
+      const FString Ext = FPaths::GetExtension(OrigName,  true);
+      const FString Safe = FString::Printf(TEXT("/tmp/vi_%s_body%s"),
+                                           *Spec.VehicleName, *Ext);
+      IFileManager::Get().Delete(*Safe, false, true, true);
+      if (IFileManager::Get().Copy(*Safe, *Spec.MeshFilePath, true) == COPY_OK)
+      {
+        UE_LOG(LogCarlaTools, Display,
+               TEXT("VI.ProcessSpec: sanitized mesh path '%s' -> '%s'"),
+               *Spec.MeshFilePath, *Safe);
+        MeshFilePathToImport = Safe;
+      }
+      else
+      {
+        UE_LOG(LogCarlaTools, Warning,
+               TEXT("VI.ProcessSpec: failed to copy sanitized mesh to %s — "
+                    "trying original path; Interchange may reject it."),
+               *Safe);
+      }
+    }
+  }
   UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 1/5 — importing body mesh"));
   UStaticMesh* BodyMesh = ImportStaticMesh(
-    Spec.MeshFilePath, VehicleContentPath,
+    MeshFilePathToImport, VehicleContentPath,
     Spec.VehicleName + TEXT("_body"), Spec);
   if (!BodyMesh)
     return MakeResponse(false, TEXT(""), TEXT("Failed to import mesh: ") + Spec.MeshFilePath);
   UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: body mesh imported OK"));
 
-  // 2. Create wheel blueprints.
   UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 2/5 — creating 4 wheel blueprints"));
+  TArray<FString> ShrunkShapePaths;
   auto MakeWheelBP = [&](const FString& Suffix, const FWheelImportSpec& W)
     -> TSubclassOf<UChaosVehicleWheel>
   {
     UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec:   wheel %s …"), *Suffix);
+    UStaticMesh* Shrunk = MakeShrunkWheelShape(
+        VehicleContentPath, Suffix, W.Radius, W.Width);
+    if (Shrunk)
+      ShrunkShapePaths.Add(Shrunk->GetPathName());
     auto R = CreateWheelBlueprint(
       VehicleContentPath,
       Spec.VehicleName + TEXT("_Wheel_") + Suffix,
-      W);
-    UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec:   wheel %s done (%s)"),
-           *Suffix, R ? TEXT("ok") : TEXT("FAILED"));
+      Suffix,
+      W,
+      Shrunk);
+    UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec:   wheel %s done (%s, shape=%s)"),
+           *Suffix, R ? TEXT("ok") : TEXT("FAILED"),
+           Shrunk ? TEXT("shrunk") : TEXT("stock"));
     return R;
   };
 
@@ -490,36 +864,28 @@ FString FVehicleImporterServer::ProcessSpec(const FVehicleImportSpec& Spec)
   if (!WheelFL || !WheelFR || !WheelRL || !WheelRR)
     return MakeResponse(false, TEXT(""), TEXT("Failed to create wheel blueprints"));
 
-  // 3. Resolve base vehicle class from provided BP path or fall back to the
-  //    Carla C++ base so GenerateNewVehicleBlueprint can always spawn a template.
+  
   UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 3/5 — loading base BP %s"),
          *Spec.BaseVehicleBP);
+
+  
+
   UClass* BaseClass = nullptr;
-  if (!Spec.BaseVehicleBP.IsEmpty())
   {
-    UObject* BPObj = UEditorAssetLibrary::LoadAsset(Spec.BaseVehicleBP);
-    UBlueprint* BPAsset = Cast<UBlueprint>(BPObj);
-    if (BPAsset && BPAsset->GeneratedClass)
-      BaseClass = BPAsset->GeneratedClass;
-  }
-  if (!BaseClass)
-  {
-    // The only base BP with a real USkeletalMesh + PhysicsAsset that
-    // GenerateNewVehicleBlueprint can consume. Production vehicle BPs
-    // (Jeep, Sprinter, …) are static-mesh rigs and won't work here.
     UObject* TplObj = UEditorAssetLibrary::LoadAsset(
-      TEXT("/Game/Carla/Blueprints/USDImportTemplates/BaseUSDImportVehicle"));
+      TEXT("/Game/Carla/Blueprints/Vehicles/BaseVehiclePawnNW"));
     if (UBlueprint* TplBP = Cast<UBlueprint>(TplObj))
       BaseClass = TplBP->GeneratedClass;
   }
   if (!BaseClass)
     return MakeResponse(false, TEXT(""),
-      TEXT("Could not resolve base vehicle class — set base_vehicle_bp in the spec"));
+      TEXT("Could not load /Game/Carla/Blueprints/Vehicles/BaseVehiclePawnNW (Chaos parent)"));
+  UE_LOG(LogCarlaTools, Display,
+         TEXT("VI.ProcessSpec: BaseClass=%s (BaseVehiclePawnNW, Chaos)"),
+         *BaseClass->GetName());
 
-  // 4. Build the merged-parts struct that GenerateNewVehicleBlueprint expects.
-  //    For this import, the body mesh covers the full vehicle. Wheel geometry
-  //    is handled by the physics asset spheres — no separate wheel static meshes
-  //    are required for a functional vehicle.
+  
+
   FMergedVehicleMeshParts Parts;
   Parts.Body = BodyMesh;
   Parts.Anchors.WheelFL = FVector(Spec.WheelFL.X, Spec.WheelFL.Y, Spec.WheelFL.Z);
@@ -533,108 +899,38 @@ FString FVehicleImporterServer::ProcessSpec(const FVehicleImportSpec& Spec)
   WheelTemplates.WheelRL = WheelRL;
   WheelTemplates.WheelRR = WheelRR;
 
-  // 5. Find the skeletal mesh + physics asset on the base vehicle. We try
-  //    three strategies, falling through if the prior one yields nothing:
-  //      a) CDO components (works only if SkelMesh is C++-declared)
-  //      b) SCS walk up the BP class hierarchy (works for BP-declared mesh)
-  //      c) Spawn the actor in the editor world and inspect the instance
-  //         (most reliable, but heavier — only used if a/b miss)
-  //    Diagnostic log dumps every component class we see along the way so
-  //    we can keep refining when a real-world BP doesn't fit a/b.
-  AActor* TemplateDefault = BaseClass->GetDefaultObject<AActor>();
-  USkeletalMeshComponent* SkelComp = nullptr;
-  auto TakeIfBetter = [&](USkeletalMeshComponent* C) {
-    if (!C) return;
-    if (C->GetSkeletalMeshAsset()) { SkelComp = C; return; }
-    if (!SkelComp) SkelComp = C;
-  };
+  
 
-  // (a) CDO components.
-  if (TemplateDefault)
-  {
-    TArray<UActorComponent*> Components;
-    TemplateDefault->GetComponents(Components);
-    UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: CDO has %d components on %s"),
-           Components.Num(), *BaseClass->GetName());
-    for (UActorComponent* C : Components)
-    {
-      if (!C) continue;
-      UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec:   CDO comp: %s (%s)"),
-             *C->GetName(), *C->GetClass()->GetName());
-      TakeIfBetter(Cast<USkeletalMeshComponent>(C));
-    }
-  }
+  
 
-  // (b) Walk every BP in the inheritance chain and inspect its SCS nodes.
-  if (!SkelComp || !SkelComp->GetSkeletalMeshAsset())
-  {
-    UClass* WalkClass = BaseClass;
-    while (WalkClass)
-    {
-      UBlueprint* WalkBP = Cast<UBlueprint>(WalkClass->ClassGeneratedBy);
-      UBlueprintGeneratedClass* OwnerGen = Cast<UBlueprintGeneratedClass>(WalkBP ? WalkBP->GeneratedClass : nullptr);
-      if (WalkBP && WalkBP->SimpleConstructionScript && OwnerGen)
-      {
-        const auto& Nodes = WalkBP->SimpleConstructionScript->GetAllNodes();
-        UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: SCS for %s has %d node(s)"),
-               *WalkClass->GetName(), Nodes.Num());
-        for (USCS_Node* Node : Nodes)
-        {
-          if (!Node) continue;
-          UActorComponent* Tmpl = Node->GetActualComponentTemplate(OwnerGen);
-          UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec:   SCS node: %s (template=%s)"),
-                 *Node->GetVariableName().ToString(),
-                 Tmpl ? *Tmpl->GetClass()->GetName() : TEXT("null"));
-          TakeIfBetter(Cast<USkeletalMeshComponent>(Tmpl));
-        }
-        if (SkelComp && SkelComp->GetSkeletalMeshAsset()) break;
-      }
-      WalkClass = WalkClass->GetSuperClass();
-    }
-  }
+  
 
-  // (c) Last-resort: spawn the actor into the transient editor world and
-  //     inspect its real components. SCS components only get materialized
-  //     at spawn time — this catches BPs whose mesh slot is set on a
-  //     base-class component overridden by the BP (common for CARLA's
-  //     ACarlaWheeledVehicle, which declares Mesh in C++ and BPs override
-  //     the asset slot). Destroyed immediately after.
-  if (!SkelComp || !SkelComp->GetSkeletalMeshAsset())
-  {
-    UWorld* SpawnWorld = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-    if (SpawnWorld)
-    {
-      FActorSpawnParameters Params;
-      Params.SpawnCollisionHandlingOverride = ESpawnActorCollisionHandlingMethod::AlwaysSpawn;
-      Params.ObjectFlags = RF_Transient;
-      AActor* Tmp = SpawnWorld->SpawnActor<AActor>(BaseClass, FTransform::Identity, Params);
-      UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: spawned %s temporarily for inspection (%s)"),
-             *BaseClass->GetName(), Tmp ? TEXT("ok") : TEXT("FAILED"));
-      if (Tmp)
-      {
-        TArray<USkeletalMeshComponent*> SMCs;
-        Tmp->GetComponents<USkeletalMeshComponent>(SMCs);
-        UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec:   spawned actor has %d SkeletalMeshComponent(s)"), SMCs.Num());
-        for (USkeletalMeshComponent* C : SMCs) TakeIfBetter(C);
-        Tmp->Destroy();
-      }
-    }
-  }
+  
 
-  USkeletalMesh*  SkelMesh    = SkelComp ? SkelComp->GetSkeletalMeshAsset() : nullptr;
-  UPhysicsAsset*  PhysAsset   = SkelMesh  ? SkelMesh->GetPhysicsAsset()      : nullptr;
-  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 4/5 — SkelMesh=%s PhysAsset=%s"),
+  static const TCHAR* kSkSrc =
+    TEXT("/Game/Carla/Blueprints/USDImportTemplates/SK_USDVehicleBase");
+  static const TCHAR* kPaSrc =
+    TEXT("/Game/Carla/Blueprints/USDImportTemplates/SK_USDVehicleBase_PhysicsAsset");
+  const FString SkDst = VehicleContentPath / (TEXT("SK_") + Spec.VehicleName);
+  const FString PaDst = VehicleContentPath / (TEXT("PA_") + Spec.VehicleName);
+  if (UEditorAssetLibrary::DoesAssetExist(SkDst))
+    UEditorAssetLibrary::DeleteAsset(SkDst);
+  if (UEditorAssetLibrary::DoesAssetExist(PaDst))
+    UEditorAssetLibrary::DeleteAsset(PaDst);
+  UObject* SkObj = UEditorAssetLibrary::DuplicateAsset(kSkSrc, SkDst);
+  UObject* PaObj = UEditorAssetLibrary::DuplicateAsset(kPaSrc, PaDst);
+  USkeletalMesh* SkelMesh   = Cast<USkeletalMesh>(SkObj);
+  UPhysicsAsset* PhysAsset  = Cast<UPhysicsAsset>(PaObj);
+  UE_LOG(LogCarlaTools, Display,
+         TEXT("VI.ProcessSpec: step 4/5 — duplicated SK=%s PA=%s"),
          SkelMesh  ? *SkelMesh->GetName()  : TEXT("null"),
          PhysAsset ? *PhysAsset->GetName() : TEXT("null"));
-
   if (!SkelMesh || !PhysAsset)
     return MakeResponse(false, TEXT(""),
-      FString::Printf(TEXT("Base vehicle blueprint has no skeletal mesh / physics asset (BP=%s SkelMesh=%s PhysAsset=%s)"),
-        *Spec.BaseVehicleBP,
+      FString::Printf(TEXT("Could not duplicate SK_USDVehicleBase or its PhysicsAsset (SK=%s PA=%s)"),
         SkelMesh ? *SkelMesh->GetName() : TEXT("null"),
         PhysAsset ? *PhysAsset->GetName() : TEXT("null")));
 
-  // 6. Build the vehicle blueprint.
   UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 5/5 — generating vehicle blueprint"));
   UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
   if (!World)
@@ -642,15 +938,175 @@ FString FVehicleImporterServer::ProcessSpec(const FVehicleImportSpec& Spec)
 
   const FString BPPath = VehicleContentPath / (TEXT("BP_") + Spec.VehicleName);
 
+  
+  
+  UEditorAssetLibrary::DeleteAsset(BPPath);
   UUSDImporterWidget::GenerateNewVehicleBlueprint(
     World, BaseClass, SkelMesh, PhysAsset, BPPath, Parts, WheelTemplates);
+
+  
+
+  FString NewPAPath;
+  if (true)
+  {
+    UObject* NewBPObj = UEditorAssetLibrary::LoadAsset(BPPath);
+    UBlueprint* NewBP = Cast<UBlueprint>(NewBPObj);
+    USkeletalMeshComponent* SkelComp2 = nullptr;
+    if (NewBP && NewBP->SimpleConstructionScript)
+    {
+      for (USCS_Node* Node : NewBP->SimpleConstructionScript->GetAllNodes())
+      {
+        if (auto* C = Cast<USkeletalMeshComponent>(
+                Node->GetActualComponentTemplate(
+                  Cast<UBlueprintGeneratedClass>(NewBP->GeneratedClass))))
+        {
+          SkelComp2 = C; break;
+        }
+      }
+    }
+    if (!SkelComp2 && NewBP && NewBP->GeneratedClass)
+    {
+      AActor* CDO = NewBP->GeneratedClass->GetDefaultObject<AActor>();
+      if (CDO)
+      {
+        TArray<UActorComponent*> Comps;
+        CDO->GetComponents(Comps);
+        for (UActorComponent* C : Comps)
+        {
+          if (auto* SK = Cast<USkeletalMeshComponent>(C)) { SkelComp2 = SK; break; }
+        }
+      }
+    }
+    USkeletalMesh* SkelMesh2 = SkelComp2 ? SkelComp2->GetSkeletalMeshAsset() : nullptr;
+    UPhysicsAsset* SrcPA     = SkelMesh2 ? SkelMesh2->GetPhysicsAsset()       : nullptr;
+
+    
+    if (PhysAsset)
+    {
+      ApplyChassisAabbResize(PhysAsset, Spec, Spec.HasChassisAabb);
+      if (SkelComp2)
+      {
+        SkelComp2->SetPhysicsAsset(PhysAsset);
+        SkelComp2->Modify();
+      }
+      if (NewBP) NewBP->MarkPackageDirty();
+      NewPAPath = PhysAsset->GetPathName();
+      UE_LOG(LogCarlaTools, Display,
+             TEXT("VI.Physics: applied damping/kinematic pass on %s (resize=%s)"),
+             *NewPAPath,
+             Spec.HasChassisAabb ? TEXT("yes") : TEXT("no"));
+    }
+    else
+    {
+      UE_LOG(LogCarlaTools, Warning, TEXT("VI.Physics: PhysAsset is null — skipping resize"));
+    }
+  }
+
+  
+
+  
+
+  
+  {
+    UObject* NewBPObj2 = UEditorAssetLibrary::LoadAsset(BPPath);
+    if (UBlueprint* NewBP2 = Cast<UBlueprint>(NewBPObj2))
+    {
+      bool bChanged = false;
+      if (UBlueprintGeneratedClass* GenClass =
+              Cast<UBlueprintGeneratedClass>(NewBP2->GeneratedClass))
+      {
+        if (AActor* CDO = Cast<AActor>(GenClass->GetDefaultObject()))
+        {
+          if (CDO->SpawnCollisionHandlingMethod !=
+              ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn)
+          {
+            CDO->SpawnCollisionHandlingMethod =
+                ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
+            bChanged = true;
+            UE_LOG(LogCarlaTools, Display,
+                   TEXT("VI.SpawnSafety: forced AdjustIfPossibleButAlwaysSpawn on %s"),
+                   *NewBP2->GetName());
+          }
+        }
+      }
+      if (bChanged)
+      {
+
+        
+
+        NewBP2->Modify();
+        if (UPackage* Pkg = NewBP2->GetOutermost()) Pkg->MarkPackageDirty();
+      }
+    }
+  }
+
+  
+
+  
+#if ENGINE_MAJOR_VERSION >= 5
+  {
+    auto FixWheelDefaults =
+        [&](const FString& WheelBpPath, float Radius, float Width)
+    {
+      UObject* WObj = UEditorAssetLibrary::LoadAsset(WheelBpPath);
+      UBlueprint* WBP = Cast<UBlueprint>(WObj);
+      if (!WBP || !WBP->GeneratedClass) return;
+      UChaosVehicleWheel* WCDO =
+          WBP->GeneratedClass->GetDefaultObject<UChaosVehicleWheel>();
+      if (!WCDO) return;
+      bool bChanged = false;
+      const float SafeR = Radius > 1.f ? Radius : 33.f;
+      const float SafeW = Width  > 1.f ? Width  : 22.f;
+      if (WCDO->WheelRadius < 1.f) { WCDO->WheelRadius = SafeR; bChanged = true; }
+      if (WCDO->WheelWidth  < 1.f) { WCDO->WheelWidth  = SafeW; bChanged = true; }
+      if (bChanged)
+      {
+        WBP->Modify();
+        if (UPackage* Pkg = WBP->GetOutermost()) Pkg->MarkPackageDirty();
+        UE_LOG(LogCarlaTools, Display,
+               TEXT("VI.SpawnSafety: wheel %s defaults R=%.1f W=%.1f"),
+               *WBP->GetName(), SafeR, SafeW);
+      }
+    };
+    FixWheelDefaults(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_FLW")),
+                     Spec.WheelFL.Radius, Spec.WheelFL.Width);
+    FixWheelDefaults(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_FRW")),
+                     Spec.WheelFR.Radius, Spec.WheelFR.Width);
+    FixWheelDefaults(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_RLW")),
+                     Spec.WheelRL.Radius, Spec.WheelRL.Width);
+    FixWheelDefaults(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_RRW")),
+                     Spec.WheelRR.Radius, Spec.WheelRR.Width);
+  }
+#endif
+
+  
+
+  
+  
+  TArray<FString> ToSave;
+  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_body")));
+  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_FLW")));
+  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_FRW")));
+  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_RLW")));
+  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_RRW")));
+  ToSave.Add(BPPath);
+  if (!NewPAPath.IsEmpty()) ToSave.Add(NewPAPath);
+  for (const FString& P : ShrunkShapePaths) ToSave.Add(P);
+  int32 Saved = 0;
+  for (const FString& Path : ToSave)
+  {
+    if (UEditorAssetLibrary::SaveAsset(Path, false))
+      ++Saved;
+    else
+      UE_LOG(LogCarlaTools, Warning, TEXT("VI.ProcessSpec: SaveAsset failed for %s"), *Path);
+  }
+  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: persisted %d/%d assets to disk"),
+         Saved, ToSave.Num());
 
   return MakeResponse(true, BPPath, TEXT(""));
 }
 
-// ---------------------------------------------------------------------------
-// Drop-to-CARLA: spawn a previously-imported vehicle BP into the editor world
-// ---------------------------------------------------------------------------
+
 
 FString FVehicleImporterServer::ProcessSpawn(const FSpawnRequest& Req)
 {
@@ -660,16 +1116,13 @@ FString FVehicleImporterServer::ProcessSpawn(const FSpawnRequest& Req)
   if (Req.AssetPath.IsEmpty())
     return MakeResponse(false, TEXT(""), TEXT("spawn: asset_path missing"));
 
-  // Resolve the actor class from the asset path. We try in order:
-  //   (1) LoadAsset → cast to UBlueprint, take GeneratedClass
-  //   (2) LoadClass with explicit `_C` suffix on the package object
-  //   (3) StaticLoadObject<UClass> with the full fixed-up path
-  // Each of these covers a slightly different shape of input the user
-  // (or our own importer) might have given us.
+  
+
+  
+  
   auto fixupClassPath = [](const FString& In) -> FString {
-    // "/Game/.../BP_X"          -> "/Game/.../BP_X.BP_X_C"
-    // "/Game/.../BP_X.BP_X"     -> "/Game/.../BP_X.BP_X_C"
-    // "/Game/.../BP_X.BP_X_C"   -> unchanged
+
+    
     if (In.EndsWith(TEXT("_C"))) return In;
     int32 Dot = INDEX_NONE; In.FindLastChar(TEXT('.'), Dot);
     int32 Slash = INDEX_NONE; In.FindLastChar(TEXT('/'), Slash);
@@ -683,7 +1136,7 @@ FString FVehicleImporterServer::ProcessSpawn(const FSpawnRequest& Req)
 
   UClass* Cls = nullptr;
   FString AttemptedPaths;
-  // (1) Direct LoadAsset → blueprint
+  
   {
     AttemptedPaths += Req.AssetPath;
     UObject* Loaded = UEditorAssetLibrary::LoadAsset(Req.AssetPath);
@@ -692,15 +1145,14 @@ FString FVehicleImporterServer::ProcessSpawn(const FSpawnRequest& Req)
     else if (UClass* DirectClass = Cast<UClass>(Loaded))
       Cls = DirectClass;
   }
-  // (2) LoadClass with `_C`-fixed-up path
+  
   if (!Cls)
   {
     const FString Fixed = fixupClassPath(Req.AssetPath);
     AttemptedPaths += TEXT(" | ") + Fixed;
     Cls = LoadClass<AActor>(nullptr, *Fixed);
   }
-  // (3) StaticLoadObject as final fallback (handles edge cases the
-  // first two miss, e.g. the asset registry not yet caching the BP).
+
   if (!Cls)
   {
     const FString Fixed = fixupClassPath(Req.AssetPath);

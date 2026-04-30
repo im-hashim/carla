@@ -34,6 +34,27 @@ if (NOT COMMAND carla_add_executable)
   endfunction ()
 endif ()
 
+option (CARLA_STUDIO_FETCH_ASSIMP
+        "Fetch + build Assimp at configure time for multi-format mesh ingest in CarlaStudio."
+        OFF)
+
+if (CARLA_STUDIO_FETCH_ASSIMP)
+  include (FetchContent)
+  set (ASSIMP_BUILD_TESTS         OFF CACHE BOOL "" FORCE)
+  set (ASSIMP_BUILD_ASSIMP_TOOLS  OFF CACHE BOOL "" FORCE)
+  set (ASSIMP_INSTALL             OFF CACHE BOOL "" FORCE)
+  set (ASSIMP_BUILD_ZLIB          ON  CACHE BOOL "" FORCE)
+  set (BUILD_SHARED_LIBS          OFF CACHE BOOL "" FORCE)
+  FetchContent_Declare (
+    assimp
+    GIT_REPOSITORY https://github.com/assimp/assimp.git
+    GIT_TAG        v5.4.3
+    GIT_SHALLOW    TRUE
+  )
+  FetchContent_MakeAvailable (assimp)
+  carla_message ("CARLA Studio: Assimp fetched and configured (multi-format mesh ingest enabled).")
+endif ()
+
 set (CARLA_STUDIO_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/src")
 set (CARLA_STUDIO_RESOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/resources")
 set (CARLA_STUDIO_APP_SOURCE "${CARLA_STUDIO_SOURCE_DIR}/app/carla_studio.cpp")
@@ -132,13 +153,27 @@ target_link_libraries (
 
 add_library (
   carla-studio-vehicle-import STATIC
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/ImportMode.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/KitBundler.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MergedSpecBuilder.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MeshConvertPage.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/Canonicalizer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/CookStep.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MeshAABB.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MeshAnalysis.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MeshGeometry.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/NameSanitizer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/SpecApplicator.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/VehicleSpec.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/ObjSanitizer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/ImporterClient.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/EditorProcess.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/BPAutopicker.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/PrebuiltPackagePage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/VehicleImportPage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/VehicleImportContainer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/CarlaSpawn.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/PluginSetup.cpp
 )
 
 set_target_properties (
@@ -156,6 +191,16 @@ target_link_libraries (
   ${CARLA_STUDIO_QT_WIDGETS_TARGET}
   ${CARLA_STUDIO_QT_CONCURRENT_TARGET}
 )
+
+if (TARGET carla-client)
+  target_link_libraries (carla-studio-vehicle-import PUBLIC carla-client)
+  target_compile_definitions (carla-studio-vehicle-import PUBLIC CARLA_STUDIO_WITH_LIBCARLA)
+endif ()
+
+if (CARLA_STUDIO_FETCH_ASSIMP AND TARGET assimp)
+  target_link_libraries (carla-studio-vehicle-import PUBLIC assimp)
+  target_compile_definitions (carla-studio-vehicle-import PUBLIC CARLA_STUDIO_WITH_ASSIMP)
+endif ()
 
 # Platform-specific icon resources that live alongside the executable sources.
 set (CARLA_STUDIO_PLATFORM_SOURCES "")

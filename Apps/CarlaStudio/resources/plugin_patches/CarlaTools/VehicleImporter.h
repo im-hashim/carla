@@ -1,7 +1,6 @@
-// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma de Barcelona (UAB). This work is licensed under the terms of the MIT license. For a copy, see <https://opensource.org/licenses/MIT>.
-
-
-
+// Copyright (c) 2026 Computer Vision Center (CVC) at the Universitat Autonoma
+// de Barcelona (UAB). This work is licensed under the terms of the MIT license.
+// For a copy, see <https://opensource.org/licenses/MIT>.
 
 #pragma once
 
@@ -17,7 +16,6 @@ struct FWheelImportSpec
 {
   float X = 0.f, Y = 0.f, Z = 0.f;
   float Radius          = 33.f;
-  float Width           = 22.f;
   float MaxSteerAngle   = 70.f;
   float MaxBrakeTorque  = 1500.f;
   float SuspMaxRaise    = 10.f;
@@ -26,7 +24,7 @@ struct FWheelImportSpec
 
 struct FSpawnRequest
 {
-  FString  AssetPath;            
+  FString  AssetPath;            // e.g. "/Game/Carla/Static/Vehicles/4Wheeled/.../BP_Foo"
   FVector  Loc = FVector(0, 0, 100);
   float    Yaw = 0.f;
 };
@@ -40,20 +38,15 @@ struct FVehicleImportSpec
 
   FWheelImportSpec WheelFL, WheelFR, WheelRL, WheelRR;
 
-  
-  
-  float ChassisXMin = 0.f, ChassisXMax = 0.f;
-  float ChassisYMin = 0.f, ChassisYMax = 0.f;
-  float ChassisZMin = 0.f, ChassisZMax = 0.f;
-  bool  HasChassisAabb = false;
-
   float Mass              = 1500.f;
   float SuspDamping       = 0.65f;
 
-  
-
+  // Source-mesh conventions detected by the client. Used to reorient/rescale
+  // the imported StaticMesh so the result is always Z-up, cm regardless of
+  // the source format (OBJ from Blender, glTF, DAE, FBX with custom axes, …).
+  // Defaults match UE's native conventions (no transform applied).
   float SourceScaleToCm   = 1.f;
-  int32 SourceUpAxis      = 2;   
+  int32 SourceUpAxis      = 2;   // 0=X, 1=Y, 2=Z
   int32 SourceForwardAxis = 0;
 };
 

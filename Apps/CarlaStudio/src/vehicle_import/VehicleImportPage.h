@@ -8,6 +8,9 @@
 
 #pragma once
 
+#include "vehicle_import/ImportMode.h"
+#include "vehicle_import/VehicleSpec.h"
+
 #include <QString>
 #include <QWidget>
 #include <functional>
@@ -35,24 +38,49 @@ class VehicleImportPage : public QWidget {
  public:
   using EditorBinaryResolver = std::function<QString()>;
   using UprojectResolver     = std::function<QString()>;
+  using CarlaRootResolver    = std::function<QString()>;
+  using StartCarlaRequester  = std::function<void()>;
 
   explicit VehicleImportPage(EditorBinaryResolver findEditor,
                              UprojectResolver     findUproject,
+                             CarlaRootResolver    findCarlaRoot,
+                             StartCarlaRequester  requestStartCarla,
                              QWidget *parent = nullptr);
+
+  void loadMeshFromPath(const QString &path);
 
  private:
   void onBrowse();
   void onImport();
   void onDrop();
+  void onBuildKit();
+  void onBrowseEnginePath();
+  void onBrowseUproject();
+  void onBrowseWheels();
+  void refreshModeBanner();
+  void refreshSourceIndicators();
+  void recomputeMergedSpec();
   void applyDisabledStateStyling();
+  QString resolvedEditorBinary() const;
+  QString resolvedUproject() const;
   QJsonObject buildImportSpec(const QString &meshPathToSend) const;
 
   EditorBinaryResolver mFindEditor;
   UprojectResolver     mFindUproject;
+  CarlaRootResolver    mFindCarlaRoot;
+  StartCarlaRequester  mRequestStartCarla;
 
+  QLineEdit       *mEnginePathEdit     = nullptr;
+  QPushButton     *mEngineBrowseBtn    = nullptr;
+  QLineEdit       *mUprojectEdit       = nullptr;
+  QPushButton     *mUprojectBrowseBtn  = nullptr;
   QLineEdit       *mMeshPathEdit       = nullptr;
   QPushButton     *mBrowseBtn          = nullptr;
+  QLineEdit       *mWheelsPathEdit     = nullptr;
+  QPushButton     *mWheelsBrowseBtn    = nullptr;
+  QLabel          *mWheelsHintLabel    = nullptr;
   QLabel          *mAabbLabel          = nullptr;
+  QLabel          *mValidationLabel    = nullptr;
   WheelSpinRow     mRowFL, mRowFR, mRowRL, mRowRR;
   QLineEdit       *mVehicleNameEdit    = nullptr;
   QLineEdit       *mContentPathEdit    = nullptr;
@@ -66,6 +94,8 @@ class VehicleImportPage : public QWidget {
   QLabel          *mUeStatusLabel      = nullptr;
   QPushButton     *mImportBtn          = nullptr;
   QPushButton     *mDropBtn            = nullptr;
+  QPushButton     *mBuildKitBtn        = nullptr;
+  QLabel          *mModeBanner         = nullptr;
   QProgressBar    *mProgress           = nullptr;
   QLabel          *mAssetLabel         = nullptr;
   QPlainTextEdit  *mLog                = nullptr;
@@ -75,6 +105,9 @@ class VehicleImportPage : public QWidget {
   std::shared_ptr<int>     mForwardAxis = std::make_shared<int>(0);
   std::shared_ptr<bool>    mAabbValid   = std::make_shared<bool>(false);
   std::shared_ptr<QString> mLastAsset   = std::make_shared<QString>();
+  std::shared_ptr<VehicleSpec> mDetectedSpec = std::make_shared<VehicleSpec>();
+  std::shared_ptr<ImportMode>  mActiveMode   = std::make_shared<ImportMode>(ImportMode::Lite);
+  QLabel                  *mDetectionLabel  = nullptr;
 };
 
 }  // namespace carla_studio::vehicle_import
