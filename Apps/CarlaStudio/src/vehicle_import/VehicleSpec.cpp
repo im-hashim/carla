@@ -119,6 +119,9 @@ QJsonObject specToJson(const VehicleSpec &s) {
   o["source_scale_to_cm"]  = s.scaleToCm;
   o["source_up_axis"]      = s.upAxis;
   o["source_forward_axis"] = s.forwardAxis;
+  o["adjust_yaw_deg"]      = s.adjustYawDeg;
+  o["adjust_mirror_x"]     = s.adjustMirrorX;
+  o["adjust_mirror_y"]     = s.adjustMirrorY;
   o["wheel_fl"] = wheelToJson(s.wheels[0]);
   o["wheel_fr"] = wheelToJson(s.wheels[1]);
   o["wheel_rl"] = wheelToJson(s.wheels[2]);

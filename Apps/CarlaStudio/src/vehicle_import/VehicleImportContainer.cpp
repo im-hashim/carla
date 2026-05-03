@@ -8,8 +8,6 @@
 
 #include "vehicle_import/VehicleImportContainer.h"
 
-#include "vehicle_import/MeshConvertPage.h"
-#include "vehicle_import/PrebuiltPackagePage.h"
 #include "vehicle_import/VehicleImportPage.h"
 
 #include <QHBoxLayout>
@@ -34,17 +32,21 @@ VehicleImportContainer::VehicleImportContainer(EditorBinaryResolver findEditor,
   mTabs->setDocumentMode(true);
   mFromMesh = new VehicleImportPage(std::move(findEditor),
                                     std::move(findUproject),
-                                    findCarlaRoot,
+                                    std::move(findCarlaRoot),
                                     std::move(requestStartCarla), this);
-  mPrebuilt = new PrebuiltPackagePage(std::move(findCarlaRoot), this);
-  mConvert  = new MeshConvertPage(
-      [this](const QString &objPath) {
-        if (mFromMesh) mFromMesh->loadMeshFromPath(objPath);
-        if (mTabs)     mTabs->setCurrentWidget(mFromMesh);
-      }, this);
+  // Single visible tab: the import flow. The other former sub-tabs were folded
+  // into the import flow itself — see notes below — so the tab bar collapses
+  // to the one operation the user actually performs.
+  //
+  //   Convert *.blend > *.obj  ─► auto-runs from Browse handlers when the
+  //                               selected file is .blend (silent).
+  //   Pre-built Package        ─► installable via the Visualize backend; log
+  //                               line at the end of visualization shows the
+  //                               archive location.
+  //   Preview                  ─► pops out into VehiclePreviewWindow
+  //                               automatically on import success.
   mTabs->addTab(mFromMesh, "From 3D Model");
-  mTabs->addTab(mPrebuilt, "Pre-built Package");
-  mTabs->addTab(mConvert,  "Convert *.blend > *.obj");
+  mTabs->tabBar()->hide();   // single tab — no need for a tab bar
   layout->addWidget(mTabs);
 }
 

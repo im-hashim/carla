@@ -12,6 +12,7 @@
 #include <QJsonDocument>
 
 #include <arpa/inet.h>
+#include <cstdlib>
 #include <errno.h>
 #include <fcntl.h>
 #include <sys/select.h>
@@ -21,12 +22,23 @@
 
 namespace carla_studio::vehicle_import {
 
+int importerPort() {
+  static const int p = []() {
+    if (const char *env = std::getenv("CARLA_VEHICLE_IMPORTER_PORT")) {
+      const int v = std::atoi(env);
+      if (v > 0 && v < 65536) return v;
+    }
+    return kImporterPort;
+  }();
+  return p;
+}
+
 bool probeImporterPort() {
   int sock = ::socket(AF_INET, SOCK_STREAM, 0);
   if (sock < 0) return false;
   struct sockaddr_in addr{};
   addr.sin_family = AF_INET;
-  addr.sin_port   = htons(kImporterPort);
+  addr.sin_port   = htons(importerPort());
   inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
   const int flags = fcntl(sock, F_GETFL, 0);
@@ -58,7 +70,7 @@ QString sendJson(const QJsonObject &spec) {
 
   struct sockaddr_in addr{};
   addr.sin_family = AF_INET;
-  addr.sin_port   = htons(kImporterPort);
+  addr.sin_port   = htons(importerPort());
   inet_pton(AF_INET, "127.0.0.1", &addr.sin_addr);
 
   if (::connect(sock, (struct sockaddr *)&addr, sizeof(addr)) != 0) {

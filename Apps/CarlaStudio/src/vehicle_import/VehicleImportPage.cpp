@@ -17,6 +17,10 @@
 #include "vehicle_import/MergedSpecBuilder.h"
 #include "vehicle_import/MeshAABB.h"
 #include "vehicle_import/MeshAnalysis.h"
+#ifdef CARLA_STUDIO_WITH_QT3D
+#include "vehicle_import/VehiclePreviewWindow.h"
+#include "vehicle_import/VehiclePreviewPage.h"
+#endif
 #include "vehicle_import/MeshGeometry.h"
 #include "vehicle_import/NameSanitizer.h"
 #include "vehicle_import/ObjSanitizer.h"
@@ -42,6 +46,7 @@
 #include <QProgressBar>
 #include <QPushButton>
 #include <QSettings>
+#include <QDateTime>
 #include <QStandardPaths>
 #include <QTime>
 #include <QTimer>
@@ -65,6 +70,12 @@ constexpr const char *kImportButtonStyle =
     "  background-color: palette(button);"
     "  border: 1px solid palette(mid);"
     "}";
+
+constexpr const char *kSuccessButtonStyle =
+    "QPushButton { padding: 4px 14px; font-weight: 600; min-width: 80px; "
+    "background-color: #C8E6C9; color: #1B5E20; "
+    "border: 1px solid #81C784; border-radius: 3px; }"
+    "QPushButton:hover { background-color: #A5D6A7; }";
 
 constexpr const char *kDefaultBaseVehicleBP =
     "/Game/Carla/Blueprints/USDImportTemplates/BaseUSDImportVehicle";
@@ -269,10 +280,12 @@ VehicleImportPage::VehicleImportPage(EditorBinaryResolver findEditor,
       QString::fromLocal8Bit(qgetenv("CARLA_UNREAL_ENGINE_PATH")).trimmed();
   const QString autoUprojHint = mFindUproject ? mFindUproject() : QString();
 
-  mEngineBrowseBtn = new QPushButton("UE: …");
+  mEngineBrowseBtn = new QPushButton("Unreal Editor");
+  mEngineBrowseBtn->setMinimumHeight(28);
   mEngineBrowseBtn->setMinimumWidth(120);
 
-  mUprojectBrowseBtn = new QPushButton("CARLA src: …");
+  mUprojectBrowseBtn = new QPushButton("Carla built from source");
+  mUprojectBrowseBtn->setMinimumHeight(28);
   mUprojectBrowseBtn->setMinimumWidth(140);
 
   mImportBtn = new QPushButton("Import");
@@ -285,7 +298,7 @@ VehicleImportPage::VehicleImportPage(EditorBinaryResolver findEditor,
     "  • Send the spec, import the mesh, build wheel + vehicle BPs.");
 
 
-  mDropBtn = new QPushButton("Visualize");
+  mDropBtn = new QPushButton("Drive");
   mDropBtn->setEnabled(false);
   mDropBtn->setMinimumWidth(110);
   mDropBtn->setToolTip(
@@ -298,11 +311,67 @@ VehicleImportPage::VehicleImportPage(EditorBinaryResolver findEditor,
   mModeBanner = new QLabel(this);
   mModeBanner->setVisible(false);
 
-  importRow->addStretch(1);
-  importRow->addWidget(mEngineBrowseBtn);
-  importRow->addWidget(mUprojectBrowseBtn);
-  importRow->addWidget(mImportBtn);
-  importRow->addWidget(mDropBtn);
+  mExportBtn = new QPushButton("Export");
+  mExportBtn->setEnabled(false);
+  mExportBtn->setMinimumWidth(96);
+  mExportBtn->setToolTip(
+      "Bundle the cooked + driveable vehicle into a single .zip archive named\n"
+      "carla_<vehicle>_ue<4|5>_<MMDDYYYY>.zip under ~/.carla_studio/exports/.\n"
+      "Useful for redistributing or installing into another CARLA root via the\n"
+      "(former) Pre-built Package install.");
+  connect(mExportBtn, &QPushButton::clicked, this, &VehicleImportPage::onExport);
+
+  // Two rows by workflow phase:
+  //   prereqRow  — read-only environment checks (UE, SRC)
+  //   importRow  — actions (Import → Drive → Export) in left-to-right sequence
+  auto *prereqRow = new QHBoxLayout();
+  prereqRow->setSpacing(8);
+  mEngineBrowseBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  mUprojectBrowseBtn->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+  prereqRow->addWidget(mEngineBrowseBtn,   1);
+  prereqRow->addWidget(mUprojectBrowseBtn, 1);
+  root->addLayout(prereqRow);
+
+  mCalibrateBtn = new QPushButton("Calibrate");
+  mCalibrateBtn->setEnabled(false);
+  mCalibrateBtn->setMinimumWidth(96);
+  mCalibrateBtn->setToolTip(
+      "Open the Vehicle Preview window for the current import — verify\n"
+      "orientation on the calibration grid; use Rot/Mirror buttons + Apply &\n"
+      "Re-import if the auto-detected forward axis is wrong.");
+  connect(mCalibrateBtn, &QPushButton::clicked, this, [this]() {
+#ifdef CARLA_STUDIO_WITH_QT3D
+    if (!mLastAsset || mLastAsset->isEmpty()) {
+      if (mLog) mLog->appendPlainText(QString("[%1]  Calibrate: no imported asset — run Import first.").arg(stamp()));
+      return;
+    }
+    const QString name = sanitizeVehicleName(mVehicleNameEdit->text().trimmed());
+    const QString canonical = QString("/tmp/vi_%1_body_canonical.obj").arg(name);
+    const QString showPath  = QFileInfo(canonical).exists()
+        ? canonical : mMeshPathEdit->text().trimmed();
+    QVector3D fl, fr, rl, rr;
+    if (mDetectedSpec) {
+      fl = QVector3D(mDetectedSpec->wheels[0].x, mDetectedSpec->wheels[0].y, mDetectedSpec->wheels[0].z);
+      fr = QVector3D(mDetectedSpec->wheels[1].x, mDetectedSpec->wheels[1].y, mDetectedSpec->wheels[1].z);
+      rl = QVector3D(mDetectedSpec->wheels[2].x, mDetectedSpec->wheels[2].y, mDetectedSpec->wheels[2].z);
+      rr = QVector3D(mDetectedSpec->wheels[3].x, mDetectedSpec->wheels[3].y, mDetectedSpec->wheels[3].z);
+    }
+    VehiclePreviewWindow::instance()->showFor(showPath, fl, fr, rl, rr);
+#endif
+  });
+
+  importRow->setSpacing(8);
+  // All 4 action buttons share the same size policy, minimum width, AND
+  // visual style — the row reads as one symmetric workflow strip.
+  for (QPushButton *b : { mImportBtn, mCalibrateBtn, mDropBtn, mExportBtn }) {
+    b->setSizePolicy(QSizePolicy::Expanding, QSizePolicy::Fixed);
+    b->setMinimumWidth(110);
+    b->setStyleSheet(kImportButtonStyle);
+  }
+  importRow->addWidget(mImportBtn,    1);
+  importRow->addWidget(mCalibrateBtn, 1);
+  importRow->addWidget(mDropBtn,      1);
+  importRow->addWidget(mExportBtn,    1);
   root->addLayout(importRow);
 
   mProgress = new QProgressBar();
@@ -343,17 +412,52 @@ VehicleImportPage::VehicleImportPage(EditorBinaryResolver findEditor,
   connect(mEngineBrowseBtn,   &QPushButton::clicked, this, &VehicleImportPage::onBrowseEnginePath);
   connect(mUprojectBrowseBtn, &QPushButton::clicked, this, &VehicleImportPage::onBrowseUproject);
 
+#ifdef CARLA_STUDIO_WITH_QT3D
+  // Calibrate button turns green when the user closes the preview window —
+  // signals that they've reviewed and accepted the calibration.
+  connect(VehiclePreviewWindow::instance(), &QDialog::finished, this,
+          [this](int) {
+            if (mCalibrateBtn && mCalibrateBtn->isEnabled())
+              mCalibrateBtn->setStyleSheet(kSuccessButtonStyle);
+          });
+
+  // Wire the preview window's "Apply & Re-import" button: stamp the user's
+  // yaw/mirror adjustments onto the in-flight spec and re-run onImport().
+  if (auto *page = VehiclePreviewWindow::instance()->page()) {
+    connect(page, &VehiclePreviewPage::applyRequested, this,
+            [this](float yawDeg, float mirrorX, float mirrorY) {
+              if (!mDetectedSpec) {
+                if (mLog) mLog->appendPlainText(
+                    QString("[%1]  Apply: no spec to update.").arg(stamp()));
+                return;
+              }
+              mDetectedSpec->adjustYawDeg  = yawDeg;
+              mDetectedSpec->adjustMirrorX = mirrorX;
+              mDetectedSpec->adjustMirrorY = mirrorY;
+              if (mLog) mLog->appendPlainText(QString(
+                  "[%1]  Apply calibration → spec (yaw=%2°, mirror=(%3,%4)) — re-importing.")
+                    .arg(stamp()).arg(yawDeg, 0, 'f', 0)
+                    .arg(mirrorX > 0 ? "+" : "-")
+                    .arg(mirrorY > 0 ? "+" : "-"));
+              onImport();
+            });
+  }
+#endif
+
   refreshSourceIndicators();
 }
+
+static QString autoConvertBlendIfNeeded(const QString &path, QPlainTextEdit *log);
 
 void VehicleImportPage::onBrowseWheels() {
   const QString seed = mWheelsPathEdit->text().trimmed();
   const QString p = QFileDialog::getOpenFileName(
       this, "Select tire-pack mesh",
       seed.isEmpty() ? QStandardPaths::writableLocation(QStandardPaths::HomeLocation) : seed,
-      "Mesh files (*.obj *.gltf *.glb *.dae)");
+      "Mesh files (*.obj *.gltf *.glb *.dae *.blend *.fbx)");
   if (p.isEmpty()) return;
-  mWheelsPathEdit->setText(p);
+  const QString resolved = autoConvertBlendIfNeeded(p, mLog);
+  mWheelsPathEdit->setText(resolved.isEmpty() ? p : resolved);
   recomputeMergedSpec();
 }
 
@@ -445,7 +549,7 @@ void VehicleImportPage::refreshSourceIndicators() {
   const QString okStyle  = indicatorStyle.arg("#C8E6C9", "#1B5E20", "#81C784", "#A5D6A7");
   const QString badStyle = indicatorStyle.arg("#FFCDD2", "#B00020", "#E57373", "#EF9A9A");
   if (mEngineBrowseBtn) {
-    mEngineBrowseBtn->setText(engOk ? QStringLiteral("UE: OK") : QStringLiteral("UE: …"));
+    mEngineBrowseBtn->setText(engOk ? QStringLiteral("Unreal Editor") : QStringLiteral("Unreal Editor"));
     mEngineBrowseBtn->setStyleSheet(engOk ? okStyle : badStyle);
     mEngineBrowseBtn->setToolTip(engOk
         ? QStringLiteral("Unreal Engine root: %1\n(click to override)").arg(eng)
@@ -453,7 +557,7 @@ void VehicleImportPage::refreshSourceIndicators() {
                          "or click to choose the engine root."));
   }
   if (mUprojectBrowseBtn) {
-    mUprojectBrowseBtn->setText(uprojOk ? QStringLiteral("CARLA src: OK") : QStringLiteral("CARLA src: …"));
+    mUprojectBrowseBtn->setText(uprojOk ? QStringLiteral("Carla built from source") : QStringLiteral("Carla built from source"));
     mUprojectBrowseBtn->setStyleSheet(uprojOk ? okStyle : badStyle);
     mUprojectBrowseBtn->setToolTip(uprojOk
         ? QStringLiteral("CarlaUnreal.uproject: %1\n(click to override)").arg(uproj)
@@ -463,7 +567,7 @@ void VehicleImportPage::refreshSourceIndicators() {
   if (mImportBtn) {
     const bool ready = engOk && uprojOk;
     mImportBtn->setToolTip(ready
-        ? QStringLiteral("Headless UE Editor: -unattended -nullrhi -nosplash -nosound. "
+        ? QStringLiteral("Headless UE Editor: -unattended -RenderOffScreen -nosplash -nosound. "
                          "Imports mesh, builds wheel + vehicle BPs, saves assets.")
         : QStringLiteral("Set UE5 + CARLA src paths first (buttons on the left)."));
   }
@@ -546,14 +650,81 @@ void VehicleImportPage::applyDisabledStateStyling() {
   mDropBtn  ->setStyleSheet(kImportButtonStyle);
 }
 
+// Silent <anything>->.obj auto-conversion via blender CLI. Handles .blend,
+// .fbx, .gltf, .glb, .dae — every input ultimately funnels through the OBJ
+// canonicalize pipeline in Stage_Preflight, so Studio's downstream code only
+// has to handle one format. Returns converted .obj path or QString() on
+// failure, or the original path if no conversion is needed.
+static QString autoConvertBlendIfNeeded(const QString &path,
+                                        QPlainTextEdit *log)
+{
+  const QString ext = QFileInfo(path).suffix().toLower();
+  if (ext == "obj") return path;
+  static const QStringList kConvertibles = { "blend", "fbx", "gltf", "glb", "dae" };
+  if (!kConvertibles.contains(ext)) return path;
+
+  const QString blender = QStandardPaths::findExecutable("blender");
+  if (blender.isEmpty()) {
+    if (log) log->appendPlainText(
+        QString("%1->obj: blender CLI not on PATH; cannot auto-convert.").arg(ext));
+    return QString();
+  }
+  const QString outObj = QString("/tmp/cs_%1_convert_%2.obj")
+      .arg(ext, QFileInfo(path).baseName());
+  if (log) log->appendPlainText(
+      QString("%1->obj: converting %2 -> %3 …").arg(ext, path, outObj));
+
+  // For non-.blend inputs we need to import first via the matching operator,
+  // then export. For .blend, the file IS the scene already.
+  QString preImport;
+  if      (ext == "fbx")   preImport = QString("bpy.ops.import_scene.fbx(filepath=r'%1')").arg(path);
+  else if (ext == "gltf"
+        || ext == "glb")   preImport = QString("bpy.ops.import_scene.gltf(filepath=r'%1')").arg(path);
+  else if (ext == "dae")   preImport = QString("bpy.ops.wm.collada_import(filepath=r'%1')").arg(path);
+
+  QStringList args;
+  args << "--background";
+  if (ext == "blend") args << path;          // open as scene
+  args << "--python-expr";
+  const QString expr = QString(
+      "import bpy\n"
+      "if %1:\n"
+      "    for o in list(bpy.data.objects):\n"
+      "        bpy.data.objects.remove(o, do_unlink=True)\n"
+      "    %2\n"
+      "try:\n"
+      "    bpy.ops.wm.obj_export(filepath=r'%3')\n"
+      "except Exception:\n"
+      "    bpy.ops.export_scene.obj(filepath=r'%3')\n"
+  ).arg(preImport.isEmpty() ? "False" : "True",
+        preImport.isEmpty() ? QStringLiteral("pass") : preImport,
+        outObj);
+  args << expr;
+  QProcess proc;
+  proc.start(blender, args);
+  if (!proc.waitForFinished(180000) || proc.exitCode() != 0) {
+    if (log) log->appendPlainText(
+        QString("%1->obj: conversion failed (%2)").arg(ext, proc.errorString()));
+    return QString();
+  }
+  if (!QFileInfo(outObj).isFile()) {
+    if (log) log->appendPlainText(
+        QString("%1->obj: blender exited 0 but output missing").arg(ext));
+    return QString();
+  }
+  if (log) log->appendPlainText(QString("%1->obj: ok").arg(ext));
+  return outObj;
+}
+
 void VehicleImportPage::onBrowse() {
   const QString path = QFileDialog::getOpenFileName(
       this, "Select 3D Model",
       QStandardPaths::writableLocation(QStandardPaths::HomeLocation),
-      "Supported 3D Models (*.obj *.gltf *.glb *.dae);;"
-      "OBJ (*.obj);;glTF (*.gltf *.glb);;Collada (*.dae);;All files (*)");
+      "Supported 3D Models (*.obj *.gltf *.glb *.dae *.blend *.fbx);;"
+      "OBJ (*.obj);;glTF (*.gltf *.glb);;Collada (*.dae);;Blender (*.blend);;FBX (*.fbx);;All files (*)");
   if (path.isEmpty()) return;
-  loadMeshFromPath(path);
+  const QString resolved = autoConvertBlendIfNeeded(path, mLog);
+  loadMeshFromPath(resolved.isEmpty() ? path : resolved);
 }
 
 void VehicleImportPage::loadMeshFromPath(const QString &path) {
@@ -564,6 +735,14 @@ void VehicleImportPage::loadMeshFromPath(const QString &path) {
   if (mDropBtn) {
     mDropBtn->setStyleSheet(kImportButtonStyle);
     mDropBtn->setEnabled(false);
+  }
+  if (mCalibrateBtn) {
+    mCalibrateBtn->setStyleSheet(kImportButtonStyle);
+    mCalibrateBtn->setEnabled(false);
+  }
+  if (mExportBtn) {
+    mExportBtn->setStyleSheet(kImportButtonStyle);
+    mExportBtn->setEnabled(false);
   }
   if (mAssetLabel) mAssetLabel->setVisible(false);
   if (mLastAsset)  mLastAsset->clear();
@@ -663,7 +842,11 @@ void VehicleImportPage::loadMeshFromPath(const QString &path) {
         "(mesh-driven analysis is .obj-only for now).").arg(stamp()));
   }
 
-  if (mVehicleNameEdit->text().trimmed().isEmpty()) {
+  // Always derive the vehicle name from the current file basename — Browse
+  // changing the file should reset the name to match (otherwise the spec ends
+  // up with a stale name from a previously-loaded vehicle, which makes cook
+  // write to the wrong content path).
+  {
     const QString sanitized = sanitizeVehicleName(QFileInfo(path).completeBaseName());
     if (!sanitized.isEmpty()) mVehicleNameEdit->setText(sanitized);
   }
@@ -785,6 +968,16 @@ void VehicleImportPage::onImport() {
   QPointer<QProgressBar>    progressPtr = mProgress;
   QPointer<QLabel>          assetPtr    = mAssetLabel;
   std::shared_ptr<QString>  lastAsset   = mLastAsset;
+  // Captured for the post-import auto-preview pop-up.
+  const QString    capturedName       = name;
+  const QString    capturedSourceMesh = meshPath;
+  QVector3D capturedFL, capturedFR, capturedRL, capturedRR;
+  if (mDetectedSpec) {
+    capturedFL = QVector3D(mDetectedSpec->wheels[0].x, mDetectedSpec->wheels[0].y, mDetectedSpec->wheels[0].z);
+    capturedFR = QVector3D(mDetectedSpec->wheels[1].x, mDetectedSpec->wheels[1].y, mDetectedSpec->wheels[1].z);
+    capturedRL = QVector3D(mDetectedSpec->wheels[2].x, mDetectedSpec->wheels[2].y, mDetectedSpec->wheels[2].z);
+    capturedRR = QVector3D(mDetectedSpec->wheels[3].x, mDetectedSpec->wheels[3].y, mDetectedSpec->wheels[3].z);
+  }
 
   auto sendNow = [=]() {
     if (!logPtr) return;
@@ -826,6 +1019,8 @@ void VehicleImportPage::onImport() {
           }
           *lastAsset = path;
           if (dropPtr) dropPtr->setEnabled(!path.isEmpty());
+          if (mCalibrateBtn) mCalibrateBtn->setEnabled(!path.isEmpty());
+          if (mExportBtn) mExportBtn->setEnabled(!path.isEmpty());
           if (btnPtr) {
             btnPtr->setStyleSheet(
               "QPushButton { padding: 4px 14px; font-weight: 600; min-width: 80px; "
@@ -834,6 +1029,19 @@ void VehicleImportPage::onImport() {
               "QPushButton:hover { background-color: #A5D6A7; }");
           }
           logPtr->appendPlainText(QString("[%1]  Success! Blueprint created at: %2").arg(stamp(), path));
+#ifdef CARLA_STUDIO_WITH_QT3D
+          // Auto-open the calibration preview with whichever mesh the plugin
+          // actually consumed: prefer the canonicalized OBJ produced by
+          // Stage_Preflight (it shows post-orientation/scale truth), fall back
+          // to the source mesh otherwise.
+          {
+            const QString canonical = QString("/tmp/vi_%1_body_canonical.obj").arg(capturedName);
+            const QString showPath  = QFileInfo(canonical).exists() ? canonical : capturedSourceMesh;
+            VehiclePreviewWindow::instance()->showFor(
+                showPath, capturedFL, capturedFR, capturedRL, capturedRR);
+            logPtr->appendPlainText(QString("[%1]  Preview opened (%2).").arg(stamp(), showPath));
+          }
+#endif
         } else {
           if (statusPtr) {
             statusPtr->setText("UE Editor: import failed");
@@ -939,10 +1147,20 @@ void VehicleImportPage::onImport() {
   // rebuild. Override-on-re-import + BP save fix live in the .so itself.
   const QString editor   = editorEarly;
   const QString uproject = uprojectEarly;
+  // Launch through /bin/sh -c so we can redirect the editor's stdout/stderr
+  // into a log file. QProcess::startDetached on its own inherits the parent's
+  // FDs, which floods Studio's terminal with UE LogXxx noise.
+  const QString editorLog = QStandardPaths::writableLocation(QStandardPaths::TempLocation)
+                          + "/carla_studio_ue_editor.log";
+  auto shEsc = [](const QString &s) {
+    QString out = s; out.replace('\'', "'\\''"); return "'" + out + "'";
+  };
+  const QString shellCmd = QString("exec %1 %2 -unattended -RenderOffScreen -nosplash -nosound >>%3 2>&1")
+      .arg(shEsc(editor), shEsc(uproject), shEsc(editorLog));
   QStringList args;
-  args << uproject << "-unattended" << "-nullrhi" << "-nosplash" << "-nosound";
+  args << "-c" << shellCmd;
   qint64 pid = 0;
-  if (!QProcess::startDetached(editor, args, QString(), &pid)) {
+  if (!QProcess::startDetached("/bin/sh", args, QString(), &pid)) {
     if (logPtr) logPtr->appendPlainText(QString("[%1]  Could not start UE Editor: %2").arg(stamp(), editor));
     if (statusPtr) {
       statusPtr->setText("UE Editor: launch failed");
@@ -952,10 +1170,10 @@ void VehicleImportPage::onImport() {
     if (btnPtr) btnPtr->setEnabled(true);
     return;
   }
-  if (logPtr) logPtr->appendPlainText(QString("[%1]  Launched headless UE Editor (pid %2) — waiting for VehicleImporter port %3.")
-                                        .arg(stamp()).arg(pid).arg(kImporterPort));
+  if (logPtr) logPtr->appendPlainText(QString("[%1]  Launched headless UE Editor (pid %2, stdout→%3) — waiting for VehicleImporter port %4.")
+                                        .arg(stamp()).arg(pid).arg(editorLog).arg(kImporterPort));
   if (statusPtr) {
-    statusPtr->setText("UE Editor: launching …");
+    statusPtr->setText("Processing …");
     statusPtr->setStyleSheet("color: #BB8800;");
   }
   if (progressPtr) {
@@ -1050,6 +1268,20 @@ void VehicleImportPage::onDrop() {
     try {
       rr = registerVehicleInJson(reg);
       if (rr.ok) {
+        // Kill the import-time headless editor BEFORE the cook commandlet
+        // launches its own editor instance — two UE editors on the same
+        // .uproject hold conflicting locks on Saved/ + DerivedDataCache and
+        // also competitively hog GPU + 16+ GB RAM, which causes the cook to
+        // fail or the system to swap-thrash.
+        const EditorProcessInfo importEd = findEditorForUproject(uproject);
+        if (importEd.exists && importEd.isHeadless) {
+          QMetaObject::invokeMethod(qApp, [logPtr, pid = importEd.pid]() {
+            if (logPtr) logPtr->appendPlainText(QString(
+                "[%1]  Killing import editor (pid %2) before cook to free RAM/GPU + clear locks.")
+                  .arg(stamp()).arg(pid));
+          }, Qt::QueuedConnection);
+          killEditor(importEd.pid);
+        }
         QMetaObject::invokeMethod(qApp, [logPtr, progPtr]() {
           if (logPtr) logPtr->appendPlainText(QString(
             "[%1]  Cooking assets for shipping CARLA — first cook is 2–3 min "
@@ -1088,11 +1320,11 @@ void VehicleImportPage::onDrop() {
     QMetaObject::invokeMethod(qApp, [=]() {
       if (!unhandled.isEmpty()) {
         if (logPtr) logPtr->appendPlainText(QString(
-          "[%1]  Visualize: caught %2 — likely API mismatch between this Studio's "
-          "libcarla-client and the running CARLA. Visualize aborted; Import side is unaffected.")
+          "[%1]  Drive: caught %2 — likely API mismatch between this Studio's "
+          "libcarla-client and the running CARLA. Drive aborted; Import side is unaffected.")
           .arg(stamp(), unhandled));
         if (statusPtr) {
-          statusPtr->setText("Visualize: aborted (LibCarla error)");
+          statusPtr->setText("Drive: aborted (LibCarla error)");
           statusPtr->setStyleSheet("color: red;");
         }
         if (btnPtr) btnPtr->setEnabled(true);
@@ -1104,6 +1336,27 @@ void VehicleImportPage::onDrop() {
                                 .arg(stamp()).arg(rr.ok ? "OK" : "FAIL").arg(rr.detail));
       logPtr->appendPlainText(QString("[%1]  Deploy to shipping CARLA: %2  (%3)")
                                 .arg(stamp()).arg(dr.ok ? "OK" : "SKIP/FAIL").arg(dr.detail));
+      // Pre-built-package archive: also copy the deployed .uasset/.uexp files to
+      // a stable per-vehicle archive folder so the user can redistribute them
+      // (this is what the former Pre-built Package tab used to install). Logged
+      // prominently so it's easy to find at the end of a visualization run.
+      if (dr.ok && !dr.destDir.isEmpty()) {
+        const QString archiveRoot = QStandardPaths::writableLocation(QStandardPaths::HomeLocation)
+                                  + "/.carla_studio/archive/" + model;
+        QDir().mkpath(archiveRoot);
+        QDir srcD(dr.destDir);
+        const QStringList files = srcD.entryList({"*.uasset", "*.uexp"}, QDir::Files);
+        int archived = 0;
+        for (const QString &f : files) {
+          const QString s = dr.destDir + "/" + f;
+          const QString t = archiveRoot + "/" + f;
+          if (QFile::exists(t)) QFile::remove(t);
+          if (QFile::copy(s, t)) ++archived;
+        }
+        logPtr->appendPlainText(QString("[%1]  Installed at: %2").arg(stamp(), dr.destDir));
+        logPtr->appendPlainText(QString("[%1]  Archived %2 file(s) → %3").arg(stamp())
+                                  .arg(archived).arg(archiveRoot));
+      }
       if (!rr.ok) {
         if (statusPtr) {
           statusPtr->setText("CARLA: registration failed");
@@ -1114,7 +1367,7 @@ void VehicleImportPage::onDrop() {
       switch (sr.kind) {
         case SpawnResult::Kind::Spawned:
           if (statusPtr) {
-            statusPtr->setText("Visualize: spawned + autopilot ON");
+            statusPtr->setText("Drive: spawned + autopilot ON");
             statusPtr->setStyleSheet("color: green;");
           }
           if (mDropBtn) {
@@ -1213,28 +1466,124 @@ void VehicleImportPage::onDrop() {
           } else if (dr.ok) {
             logPtr->appendPlainText(QString(
               "[%1]  Vehicle is now on disk in the shipping CARLA tree. Start CARLA via "
-              "Studio's START button, then click Visualize again to spawn it.").arg(stamp()));
+              "Studio's START button, then click Drive again to spawn it.").arg(stamp()));
           }
           break;
         case SpawnResult::Kind::Failed:
           if (sr.detail.isEmpty()) {
             if (statusPtr) {
-              statusPtr->setText("Visualize: deployed to CARLA");
+              statusPtr->setText("Drive: deployed to CARLA");
               statusPtr->setStyleSheet("color: green;");
             }
             if (dr.ok) {
               logPtr->appendPlainText(QString(
-                "[%1]  Vehicle deployed. Could not auto-spawn — start CARLA and re-click Visualize.")
+                "[%1]  Vehicle deployed. Could not auto-spawn — start CARLA and re-click Drive.")
                 .arg(stamp()));
             }
           } else {
             if (statusPtr) {
-              statusPtr->setText("Visualize: spawn failed");
+              statusPtr->setText("Drive: spawn failed");
               statusPtr->setStyleSheet("color: red;");
             }
             logPtr->appendPlainText(QString("[%1]  Spawn: FAIL — %2").arg(stamp(), sr.detail));
           }
           break;
+      }
+    }, Qt::QueuedConnection);
+  }));
+}
+
+void VehicleImportPage::onExport() {
+  if (!mLastAsset || mLastAsset->isEmpty()) {
+    if (mLog) mLog->appendPlainText(QString("[%1]  Export: no imported asset yet — run Import first.").arg(stamp()));
+    return;
+  }
+  const QString name = sanitizeVehicleName(mVehicleNameEdit->text().trimmed());
+  if (name.isEmpty()) return;
+
+  const QString carlaRoot = mFindCarlaRoot ? mFindCarlaRoot() : QString();
+  const QString uproject  = resolvedUproject();
+
+  // Make sure cooked files exist in shipping CARLA root. If they don't,
+  // run the deploy step first (idempotent — overwrites if present).
+  VehicleRegistration reg;
+  reg.uprojectPath      = uproject;
+  reg.shippingCarlaRoot = carlaRoot;
+  reg.bpAssetPath       = *mLastAsset;
+  reg.make              = "Custom";
+  reg.model             = name;
+  reg.editorBinary      = resolvedEditorBinary();
+
+  if (mExportBtn) mExportBtn->setEnabled(false);
+  if (mLog) mLog->appendPlainText(QString("[%1]  Export: cooking + bundling %2 …").arg(stamp(), name));
+
+  QPointer<QPushButton>    btnPtr  = mExportBtn;
+  QPointer<QPlainTextEdit> logPtr  = mLog;
+  const QString            engineRoot = qEnvironmentVariable("CARLA_UNREAL_ENGINE_PATH");
+
+  Q_UNUSED(QtConcurrent::run([=]() {
+    DeployResult dr;
+    QString unhandled;
+    try {
+      // Same kill-before-cook discipline as onDrop — the cook commandlet
+      // can't share the .uproject with a running headless editor.
+      const EditorProcessInfo importEd = findEditorForUproject(uproject);
+      if (importEd.exists && importEd.isHeadless) {
+        QMetaObject::invokeMethod(qApp, [logPtr, pid = importEd.pid]() {
+          if (logPtr) logPtr->appendPlainText(QString(
+              "[%1]  Killing import editor (pid %2) before cook.")
+                .arg(stamp()).arg(pid));
+        }, Qt::QueuedConnection);
+        killEditor(importEd.pid);
+      }
+      dr = deployVehicleToShippingCarla(reg);
+    } catch (const std::exception &e) {
+      unhandled = QString("std::exception: %1").arg(QString::fromUtf8(e.what()));
+    } catch (...) {
+      unhandled = "unknown C++ exception";
+    }
+
+    QString zipPath, zipDetail;
+    bool zipOk = false;
+    if (dr.ok && !dr.destDir.isEmpty()) {
+      // Detect UE major version: prefer the engine root, fall back to "5".
+      int ueMajor = 5;
+      if (engineRoot.contains("Unreal4") || engineRoot.contains("UE4")) ueMajor = 4;
+      const QString date = QDateTime::currentDateTime().toString("MMddyyyy");
+      const QString outDir = QStandardPaths::writableLocation(QStandardPaths::HomeLocation)
+                           + "/.carla_studio/exports";
+      QDir().mkpath(outDir);
+      zipPath = QString("%1/carla_%2_ue%3_%4.zip").arg(outDir, name).arg(ueMajor).arg(date);
+      QFile::remove(zipPath);
+      QProcess proc;
+      proc.setWorkingDirectory(QFileInfo(dr.destDir).absolutePath());
+      const QString folderName = QFileInfo(dr.destDir).fileName();
+      proc.start("zip", QStringList() << "-r" << "-q" << zipPath << folderName);
+      if (proc.waitForFinished(120000) && proc.exitCode() == 0
+          && QFileInfo(zipPath).size() > 0) {
+        zipOk = true;
+        zipDetail = QString("%1 bytes").arg(QFileInfo(zipPath).size());
+      } else {
+        zipDetail = QString("zip exit=%1: %2")
+            .arg(proc.exitCode())
+            .arg(QString::fromUtf8(proc.readAllStandardError()).trimmed());
+      }
+    }
+
+    QMetaObject::invokeMethod(qApp, [=]() {
+      if (btnPtr) btnPtr->setEnabled(true);
+      if (!logPtr) return;
+      if (!unhandled.isEmpty()) {
+        logPtr->appendPlainText(QString("[%1]  Export: deploy aborted — %2").arg(stamp(), unhandled));
+        return;
+      }
+      logPtr->appendPlainText(QString("[%1]  Export: deploy %2  (%3)")
+                                .arg(stamp()).arg(dr.ok ? "OK" : "FAIL").arg(dr.detail));
+      if (zipOk) {
+        logPtr->appendPlainText(QString("[%1]  Export: archive → %2  (%3)").arg(stamp(), zipPath, zipDetail));
+        if (mExportBtn) mExportBtn->setStyleSheet(kSuccessButtonStyle);
+      } else if (dr.ok) {
+        logPtr->appendPlainText(QString("[%1]  Export: zip failed — %2").arg(stamp(), zipDetail));
       }
     }, Qt::QueuedConnection);
   }));

@@ -156,7 +156,6 @@ add_library (
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/ImportMode.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/KitBundler.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MergedSpecBuilder.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MeshConvertPage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/Canonicalizer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/CookStep.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MeshAABB.cpp
@@ -169,9 +168,11 @@ add_library (
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/ImporterClient.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/EditorProcess.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/BPAutopicker.cpp
-  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/PrebuiltPackagePage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/VehicleImportPage.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/VehicleImportContainer.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/VehiclePreviewPage.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/VehiclePreviewWindow.cpp
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/MeshPreviewRenderer.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/CarlaSpawn.cpp
   ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/PluginSetup.cpp
 )
@@ -191,6 +192,23 @@ target_link_libraries (
   ${CARLA_STUDIO_QT_WIDGETS_TARGET}
   ${CARLA_STUDIO_QT_CONCURRENT_TARGET}
 )
+
+# Qt3D for the in-Studio vehicle preview viewer (VehiclePreviewPage). The
+# viewer renders the source mesh on a calibration grid before any Unreal
+# import — orientation, scale, and wheel-marker checks happen here.
+if (CARLA_STUDIO_QT_VERSION EQUAL 6)
+  find_package (Qt6 COMPONENTS 3DCore 3DRender 3DInput 3DExtras QUIET)
+  if (TARGET Qt6::3DCore AND TARGET Qt6::3DRender AND TARGET Qt6::3DInput AND TARGET Qt6::3DExtras)
+    target_link_libraries (carla-studio-vehicle-import PUBLIC
+      Qt6::3DCore Qt6::3DRender Qt6::3DInput Qt6::3DExtras)
+    target_compile_definitions (carla-studio-vehicle-import PUBLIC CARLA_STUDIO_WITH_QT3D)
+    carla_message ("Qt6 3D modules linked; vehicle preview Qt3D viewer enabled.")
+  else ()
+    carla_message ("Qt6 3D modules not found; vehicle preview viewer will be a stub.")
+  endif ()
+else ()
+  carla_message ("Qt5 path: vehicle preview viewer not built (Qt5 3D not wired).")
+endif ()
 
 if (TARGET carla-client)
   target_link_libraries (carla-studio-vehicle-import PUBLIC carla-client)
@@ -263,6 +281,37 @@ target_link_libraries (
 target_compile_definitions (
   carla-studio PRIVATE
   "CARLA_STUDIO_VERSION_STRING=\"${CARLA_STUDIO_VERSION}\""
+)
+
+# Calibration CLI: pre-import inspector. Loads a vehicle mesh, renders top /
+# side / front PNGs on a 1m calibration grid, prints a JSON summary. Same
+# rendering core as the Studio Preview tab. Used from the terminal for
+# regression-free orientation and size-class checks before touching Unreal.
+carla_add_executable (
+  carla-studio-vehicle-preview
+  "Calibration CLI for vehicle mesh inspection."
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/CalibrationCli.cpp
+)
+target_link_libraries (
+  carla-studio-vehicle-preview PRIVATE
+  carla-studio-vehicle-import
+  ${CARLA_STUDIO_QT_CORE_TARGET}
+  ${CARLA_STUDIO_QT_WIDGETS_TARGET}
+)
+
+# Offline end-to-end import test rig — spawns its own headless UE editor on a
+# non-clashing port (default 18584, set via CARLA_VEHICLE_IMPORTER_PORT) and
+# pushes Studio's exact wire-format spec for each fixture, so wire-format bugs
+# (e.g. missing null-terminator) are caught without involving the GUI.
+carla_add_executable (
+  carla-studio-vehicle-import-test
+  "Offline import end-to-end test (no GUI, no Python, isolated port)."
+  ${CMAKE_CURRENT_SOURCE_DIR}/src/vehicle_import/ImportTestCli.cpp
+)
+target_link_libraries (
+  carla-studio-vehicle-import-test PRIVATE
+  carla-studio-vehicle-import
+  ${CARLA_STUDIO_QT_CORE_TARGET}
 )
 
 if (CARLA_STUDIO_QT_VERSION EQUAL 6)

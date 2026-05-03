@@ -53,8 +53,12 @@ struct FVehicleImportSpec
   
 
   float SourceScaleToCm   = 1.f;
-  int32 SourceUpAxis      = 2;   
+  int32 SourceUpAxis      = 2;
   int32 SourceForwardAxis = 0;
+
+  float UserAdjustYawDeg  = 0.f;
+  float UserAdjustMirrorX = 1.f;
+  float UserAdjustMirrorY = 1.f;
 };
 
 class FVehicleImporterServer final : public FRunnable

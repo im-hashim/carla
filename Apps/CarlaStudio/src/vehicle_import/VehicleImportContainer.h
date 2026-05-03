@@ -17,8 +17,6 @@ class QTabWidget;
 namespace carla_studio::vehicle_import {
 
 class VehicleImportPage;
-class PrebuiltPackagePage;
-class MeshConvertPage;
 
 class VehicleImportContainer : public QWidget {
   Q_OBJECT
@@ -34,15 +32,11 @@ class VehicleImportContainer : public QWidget {
                                   StartCarlaRequester  requestStartCarla,
                                   QWidget *parent = nullptr);
 
-  PrebuiltPackagePage *prebuiltPage() const { return mPrebuilt; }
-
   void setSubTabCornerWidget(QWidget *w);
 
  private:
   QTabWidget          *mTabs     = nullptr;
   VehicleImportPage   *mFromMesh = nullptr;
-  PrebuiltPackagePage *mPrebuilt = nullptr;
-  MeshConvertPage     *mConvert  = nullptr;
 };
 
 }  // namespace carla_studio::vehicle_import

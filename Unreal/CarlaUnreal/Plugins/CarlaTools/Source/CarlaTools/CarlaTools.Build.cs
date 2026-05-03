@@ -120,7 +120,11 @@ public class CarlaTools :
       "MeshDescription",
       "MeshUtilitiesCommon",
       "Projects",
-      "PCG"
+      "PCG",
+      "InterchangeCore",
+      "InterchangeEngine",
+      "InterchangePipelines",
+      "ImageWrapper"
     });
 
     if (EnableNVIDIAOmniverse)

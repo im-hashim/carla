@@ -4,8 +4,16 @@
 
 
 #include "VehicleImporter.h"
+#include "VehicleImporter_Helpers.h"
 #include "USDImporterWidget.h"
 #include "CarlaTools.h"
+#include "Stages/Stage_Common.h"
+#include "Stages/Stage_Preflight.h"
+#include "Stages/Stage_Interchange.h"
+#include "Stages/Stage_BuildSK.h"
+#include "Stages/Stage_BuildBP.h"
+#include "Stages/Stage_Persist.h"
+#include "Tests/VehicleImportTestRunner.h"
 
 #include <util/ue-header-guard-begin.h>
 #include "Sockets.h"
@@ -55,7 +63,18 @@
 #include "Runtime/Launch/Resources/Version.h"
 #include <util/ue-header-guard-end.h>
 
-static constexpr int32 GImporterPort = 18583;
+// Port is configurable via env var CARLA_VEHICLE_IMPORTER_PORT so the offline
+// C++ test rig (carla-studio-vehicle-import-test) can run on a non-clashing
+// port (default 18584) while Studio's editor stays on 18583.
+static int32 ResolveImporterPort() {
+  const FString env = FPlatformMisc::GetEnvironmentVariable(TEXT("CARLA_VEHICLE_IMPORTER_PORT"));
+  if (!env.IsEmpty()) {
+    const int32 p = FCString::Atoi(*env);
+    if (p > 0 && p < 65536) return p;
+  }
+  return 18583;
+}
+static const int32 GImporterPort = ResolveImporterPort();
 
 static constexpr int32 GMaxMessageBytes = 10 * 1024 * 1024;
 
@@ -421,10 +440,15 @@ void FVehicleImporterServer::ServeClient(FSocket* Client)
     return;
   }
 
+  // +1 byte for an explicit null terminator. Studio's wire protocol does not
+  // send a trailing NUL — UTF8_TO_TCHAR/FString below would otherwise scan
+  // into uninitialised heap memory and append garbage to the JSON string,
+  // which UE's JSON parser then rejects as "JSON parse error".
   TArray<uint8> Body;
-  Body.SetNumUninitialized(MsgLen);
+  Body.SetNumUninitialized(MsgLen + 1);
   if (!RecvAll(Client, Body.GetData(), MsgLen))
     return;
+  Body[MsgLen] = 0;
 
   const FString JsonStr = FString(UTF8_TO_TCHAR(
     reinterpret_cast<const ANSICHAR*>(Body.GetData())));
@@ -437,13 +461,42 @@ void FVehicleImporterServer::ServeClient(FSocket* Client)
   TSharedRef<TJsonReader<>> Reader = TJsonReaderFactory<>::Create(JsonStr);
   if (!FJsonSerializer::Deserialize(Reader, Root) || !Root.IsValid())
   {
+    UE_LOG(LogCarlaTools, Warning,
+           TEXT("VI: JSON parse failed; len=%d, full=%s"),
+           JsonStr.Len(), *JsonStr);
     Response = MakeResponse(false, TEXT(""), TEXT("JSON parse error"));
   }
   else
   {
     FString Action;
     Root->TryGetStringField(TEXT("action"), Action);
-    if (Action.Equals(TEXT("spawn"), ESearchCase::IgnoreCase))
+    if (Action.Equals(TEXT("test_matrix"), ESearchCase::IgnoreCase))
+    {
+      TArray<VehicleImport::FTestMatrixSpec> Specs;
+      const TArray<TSharedPtr<FJsonValue>>* Arr = nullptr;
+      if (Root->TryGetArrayField(TEXT("vehicles"), Arr) && Arr)
+      {
+        for (const TSharedPtr<FJsonValue>& V : *Arr)
+        {
+          const TSharedPtr<FJsonObject>* O = nullptr;
+          if (!V->TryGetObject(O) || !O || !(*O).IsValid()) continue;
+          VehicleImport::FTestMatrixSpec S;
+          (*O)->TryGetStringField(TEXT("name"), S.VehicleName);
+          (*O)->TryGetStringField(TEXT("bp"),   S.BPPath);
+          if (!S.VehicleName.IsEmpty() && !S.BPPath.IsEmpty()) Specs.Add(S);
+        }
+      }
+      auto P = MakeShared<TPromise<FString>>();
+      TFuture<FString> Future = P->GetFuture();
+      FTSTicker::GetCoreTicker().AddTicker(FTickerDelegate::CreateLambda(
+        [Specs, P](float) -> bool {
+          VehicleImport::FTestMatrixResult R = VehicleImport::RunMatrix(Specs);
+          P->SetValue(VehicleImport::ResultsToJson(R));
+          return false;
+        }));
+      Response = Future.Get();
+    }
+    else if (Action.Equals(TEXT("spawn"), ESearchCase::IgnoreCase))
     {
       FSpawnRequest Req;
       Root->TryGetStringField(TEXT("asset_path"), Req.AssetPath);
@@ -563,6 +616,13 @@ bool FVehicleImporterServer::ParseSpec(const FString& Json, FVehicleImportSpec& 
   Root->TryGetNumberField(TEXT("source_up_axis"),      IV); Out.SourceUpAxis      = IV;
   IV = 0;
   Root->TryGetNumberField(TEXT("source_forward_axis"), IV); Out.SourceForwardAxis = IV;
+
+  V = 0.0;
+  Root->TryGetNumberField(TEXT("adjust_yaw_deg"),    V); Out.UserAdjustYawDeg  = (float)V;
+  V = 1.0;
+  Root->TryGetNumberField(TEXT("adjust_mirror_x"),   V); Out.UserAdjustMirrorX = (float)V;
+  V = 1.0;
+  Root->TryGetNumberField(TEXT("adjust_mirror_y"),   V); Out.UserAdjustMirrorY = (float)V;
 
   ParseWheel(Root, TEXT("wheel_fl"), Out.WheelFL);
   ParseWheel(Root, TEXT("wheel_fr"), Out.WheelFR);
@@ -771,339 +831,105 @@ static TSubclassOf<UChaosVehicleWheel> CreateWheelBlueprint(
   return TSubclassOf<UChaosVehicleWheel>(BP->GeneratedClass);
 }
 
+namespace VehicleImport
+{
+  FString SanitizeAssetName(const FString& In)
+  {
+    return ::SanitizeAssetName(In);
+  }
+  UStaticMesh* ImportStaticMesh(const FString& FilePath,
+                                const FString& ContentPath,
+                                const FString& AssetName,
+                                const FVehicleImportSpec& Spec)
+  {
+    return ::ImportStaticMesh(FilePath, ContentPath, AssetName, Spec);
+  }
+  UStaticMesh* MakeShrunkWheelShape(const FString& VehicleContentPath,
+                                    const FString& Suffix,
+                                    float RadiusCm,
+                                    float WidthCm)
+  {
+    return ::MakeShrunkWheelShape(VehicleContentPath, Suffix, RadiusCm, WidthCm);
+  }
+  TSubclassOf<UChaosVehicleWheel> CreateWheelBlueprint(
+      const FString& ContentPath,
+      const FString& Name,
+      const FString& Suffix,
+      const FWheelImportSpec& W,
+      UStaticMesh* ShrunkShapeOverride)
+  {
+    return ::CreateWheelBlueprint(ContentPath, Name, Suffix, W, ShrunkShapeOverride);
+  }
+  void ApplyChassisAabbResize(UPhysicsAsset* PA,
+                              const FVehicleImportSpec& Spec,
+                              bool bHaveAabb)
+  {
+    ::ApplyChassisAabbResize(PA, Spec, bHaveAabb);
+  }
+}
+
 FString FVehicleImporterServer::ProcessSpec(const FVehicleImportSpec& Spec)
 {
+  using namespace VehicleImport;
+
   UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: enter (vehicle=%s mesh=%s)"),
          *Spec.VehicleName, *Spec.MeshFilePath);
 
-  FString ContentRoot = Spec.ContentPath;
-  if (ContentRoot.EndsWith(TEXT("/")))
-    ContentRoot.RemoveFromEnd(TEXT("/"));
-  const FString VehicleContentPath = ContentRoot / Spec.VehicleName;
-
-  
-
-  
-  if (UEditorAssetLibrary::DoesDirectoryExist(VehicleContentPath))
+  FNormalizedSpec Norm;
+  if (FStageError E = RunStage_Preflight(Spec, Norm); !E.IsOk())
   {
-    UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: %s already exists — deleting before re-import"),
-           *VehicleContentPath);
-    UEditorAssetLibrary::DeleteDirectory(VehicleContentPath);
+    UE_LOG(LogCarlaTools, Warning, TEXT("VI.ProcessSpec: preflight failed: %s"), *E.ToString());
+    return MakeResponse(false, TEXT(""), E.ToString());
   }
-
-  
-
-  
-  
-  FString MeshFilePathToImport = Spec.MeshFilePath;
-  {
-    const FString OrigName = FPaths::GetCleanFilename(Spec.MeshFilePath);
-    bool bNeedsSanitize = false;
-    for (TCHAR C : OrigName) {
-      const bool bSafe = (C >= 'A' && C <= 'Z') || (C >= 'a' && C <= 'z')
-                      || (C >= '0' && C <= '9') || C == '_' || C == '-' || C == '.';
-      if (!bSafe) { bNeedsSanitize = true; break; }
-    }
-    if (bNeedsSanitize)
-    {
-      const FString Ext = FPaths::GetExtension(OrigName,  true);
-      const FString Safe = FString::Printf(TEXT("/tmp/vi_%s_body%s"),
-                                           *Spec.VehicleName, *Ext);
-      IFileManager::Get().Delete(*Safe, false, true, true);
-      if (IFileManager::Get().Copy(*Safe, *Spec.MeshFilePath, true) == COPY_OK)
-      {
-        UE_LOG(LogCarlaTools, Display,
-               TEXT("VI.ProcessSpec: sanitized mesh path '%s' -> '%s'"),
-               *Spec.MeshFilePath, *Safe);
-        MeshFilePathToImport = Safe;
-      }
-      else
-      {
-        UE_LOG(LogCarlaTools, Warning,
-               TEXT("VI.ProcessSpec: failed to copy sanitized mesh to %s — "
-                    "trying original path; Interchange may reject it."),
-               *Safe);
-      }
-    }
-  }
-  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 1/5 — importing body mesh"));
-  UStaticMesh* BodyMesh = ImportStaticMesh(
-    MeshFilePathToImport, VehicleContentPath,
-    Spec.VehicleName + TEXT("_body"), Spec);
-  if (!BodyMesh)
-    return MakeResponse(false, TEXT(""), TEXT("Failed to import mesh: ") + Spec.MeshFilePath);
-  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: body mesh imported OK"));
-
-  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 2/5 — creating 4 wheel blueprints"));
-  TArray<FString> ShrunkShapePaths;
-  auto MakeWheelBP = [&](const FString& Suffix, const FWheelImportSpec& W)
-    -> TSubclassOf<UChaosVehicleWheel>
-  {
-    UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec:   wheel %s …"), *Suffix);
-    UStaticMesh* Shrunk = MakeShrunkWheelShape(
-        VehicleContentPath, Suffix, W.Radius, W.Width);
-    if (Shrunk)
-      ShrunkShapePaths.Add(Shrunk->GetPathName());
-    auto R = CreateWheelBlueprint(
-      VehicleContentPath,
-      Spec.VehicleName + TEXT("_Wheel_") + Suffix,
-      Suffix,
-      W,
-      Shrunk);
-    UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec:   wheel %s done (%s, shape=%s)"),
-           *Suffix, R ? TEXT("ok") : TEXT("FAILED"),
-           Shrunk ? TEXT("shrunk") : TEXT("stock"));
-    return R;
-  };
-
-  TSubclassOf<UChaosVehicleWheel> WheelFL = MakeWheelBP(TEXT("FLW"), Spec.WheelFL);
-  TSubclassOf<UChaosVehicleWheel> WheelFR = MakeWheelBP(TEXT("FRW"), Spec.WheelFR);
-  TSubclassOf<UChaosVehicleWheel> WheelRL = MakeWheelBP(TEXT("RLW"), Spec.WheelRL);
-  TSubclassOf<UChaosVehicleWheel> WheelRR = MakeWheelBP(TEXT("RRW"), Spec.WheelRR);
-
-  if (!WheelFL || !WheelFR || !WheelRL || !WheelRR)
-    return MakeResponse(false, TEXT(""), TEXT("Failed to create wheel blueprints"));
-
-  
-  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 3/5 — loading base BP %s"),
-         *Spec.BaseVehicleBP);
-
-  
-
-  UClass* BaseClass = nullptr;
-  {
-    UObject* TplObj = UEditorAssetLibrary::LoadAsset(
-      TEXT("/Game/Carla/Blueprints/Vehicles/BaseVehiclePawnNW"));
-    if (UBlueprint* TplBP = Cast<UBlueprint>(TplObj))
-      BaseClass = TplBP->GeneratedClass;
-  }
-  if (!BaseClass)
-    return MakeResponse(false, TEXT(""),
-      TEXT("Could not load /Game/Carla/Blueprints/Vehicles/BaseVehiclePawnNW (Chaos parent)"));
   UE_LOG(LogCarlaTools, Display,
-         TEXT("VI.ProcessSpec: BaseClass=%s (BaseVehiclePawnNW, Chaos)"),
-         *BaseClass->GetName());
+         TEXT("VI.ProcessSpec: stage 1/5 preflight ok (mesh=%s, sanitized=%s)"),
+         *Norm.MeshFilePathToImport, Norm.bWasSanitized ? TEXT("yes") : TEXT("no"));
 
-  
-
-  FMergedVehicleMeshParts Parts;
-  Parts.Body = BodyMesh;
-  Parts.Anchors.WheelFL = FVector(Spec.WheelFL.X, Spec.WheelFL.Y, Spec.WheelFL.Z);
-  Parts.Anchors.WheelFR = FVector(Spec.WheelFR.X, Spec.WheelFR.Y, Spec.WheelFR.Z);
-  Parts.Anchors.WheelRL = FVector(Spec.WheelRL.X, Spec.WheelRL.Y, Spec.WheelRL.Z);
-  Parts.Anchors.WheelRR = FVector(Spec.WheelRR.X, Spec.WheelRR.Y, Spec.WheelRR.Z);
-
-  FWheelTemplates WheelTemplates;
-  WheelTemplates.WheelFL = WheelFL;
-  WheelTemplates.WheelFR = WheelFR;
-  WheelTemplates.WheelRL = WheelRL;
-  WheelTemplates.WheelRR = WheelRR;
-
-  
-
-  
-
-  
-
-  
-
-  static const TCHAR* kSkSrc =
-    TEXT("/Game/Carla/Blueprints/USDImportTemplates/SK_USDVehicleBase");
-  static const TCHAR* kPaSrc =
-    TEXT("/Game/Carla/Blueprints/USDImportTemplates/SK_USDVehicleBase_PhysicsAsset");
-  const FString SkDst = VehicleContentPath / (TEXT("SK_") + Spec.VehicleName);
-  const FString PaDst = VehicleContentPath / (TEXT("PA_") + Spec.VehicleName);
-  if (UEditorAssetLibrary::DoesAssetExist(SkDst))
-    UEditorAssetLibrary::DeleteAsset(SkDst);
-  if (UEditorAssetLibrary::DoesAssetExist(PaDst))
-    UEditorAssetLibrary::DeleteAsset(PaDst);
-  UObject* SkObj = UEditorAssetLibrary::DuplicateAsset(kSkSrc, SkDst);
-  UObject* PaObj = UEditorAssetLibrary::DuplicateAsset(kPaSrc, PaDst);
-  USkeletalMesh* SkelMesh   = Cast<USkeletalMesh>(SkObj);
-  UPhysicsAsset* PhysAsset  = Cast<UPhysicsAsset>(PaObj);
-  UE_LOG(LogCarlaTools, Display,
-         TEXT("VI.ProcessSpec: step 4/5 — duplicated SK=%s PA=%s"),
-         SkelMesh  ? *SkelMesh->GetName()  : TEXT("null"),
-         PhysAsset ? *PhysAsset->GetName() : TEXT("null"));
-  if (!SkelMesh || !PhysAsset)
-    return MakeResponse(false, TEXT(""),
-      FString::Printf(TEXT("Could not duplicate SK_USDVehicleBase or its PhysicsAsset (SK=%s PA=%s)"),
-        SkelMesh ? *SkelMesh->GetName() : TEXT("null"),
-        PhysAsset ? *PhysAsset->GetName() : TEXT("null")));
-
-  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: step 5/5 — generating vehicle blueprint"));
-  UWorld* World = GEditor ? GEditor->GetEditorWorldContext().World() : nullptr;
-  if (!World)
-    return MakeResponse(false, TEXT(""), TEXT("No editor world available"));
-
-  const FString BPPath = VehicleContentPath / (TEXT("BP_") + Spec.VehicleName);
-
-  
-  
-  UEditorAssetLibrary::DeleteAsset(BPPath);
-  UUSDImporterWidget::GenerateNewVehicleBlueprint(
-    World, BaseClass, SkelMesh, PhysAsset, BPPath, Parts, WheelTemplates);
-
-  
-
-  FString NewPAPath;
-  if (true)
+  FInterchangeOutputs IcOut;
+  if (FStageError E = RunStage_Interchange(Norm, Spec, IcOut); !E.IsOk())
   {
-    UObject* NewBPObj = UEditorAssetLibrary::LoadAsset(BPPath);
-    UBlueprint* NewBP = Cast<UBlueprint>(NewBPObj);
-    USkeletalMeshComponent* SkelComp2 = nullptr;
-    if (NewBP && NewBP->SimpleConstructionScript)
-    {
-      for (USCS_Node* Node : NewBP->SimpleConstructionScript->GetAllNodes())
-      {
-        if (auto* C = Cast<USkeletalMeshComponent>(
-                Node->GetActualComponentTemplate(
-                  Cast<UBlueprintGeneratedClass>(NewBP->GeneratedClass))))
-        {
-          SkelComp2 = C; break;
-        }
-      }
-    }
-    if (!SkelComp2 && NewBP && NewBP->GeneratedClass)
-    {
-      AActor* CDO = NewBP->GeneratedClass->GetDefaultObject<AActor>();
-      if (CDO)
-      {
-        TArray<UActorComponent*> Comps;
-        CDO->GetComponents(Comps);
-        for (UActorComponent* C : Comps)
-        {
-          if (auto* SK = Cast<USkeletalMeshComponent>(C)) { SkelComp2 = SK; break; }
-        }
-      }
-    }
-    USkeletalMesh* SkelMesh2 = SkelComp2 ? SkelComp2->GetSkeletalMeshAsset() : nullptr;
-    UPhysicsAsset* SrcPA     = SkelMesh2 ? SkelMesh2->GetPhysicsAsset()       : nullptr;
-
-    
-    if (PhysAsset)
-    {
-      ApplyChassisAabbResize(PhysAsset, Spec, Spec.HasChassisAabb);
-      if (SkelComp2)
-      {
-        SkelComp2->SetPhysicsAsset(PhysAsset);
-        SkelComp2->Modify();
-      }
-      if (NewBP) NewBP->MarkPackageDirty();
-      NewPAPath = PhysAsset->GetPathName();
-      UE_LOG(LogCarlaTools, Display,
-             TEXT("VI.Physics: applied damping/kinematic pass on %s (resize=%s)"),
-             *NewPAPath,
-             Spec.HasChassisAabb ? TEXT("yes") : TEXT("no"));
-    }
-    else
-    {
-      UE_LOG(LogCarlaTools, Warning, TEXT("VI.Physics: PhysAsset is null — skipping resize"));
-    }
+    UE_LOG(LogCarlaTools, Warning, TEXT("VI.ProcessSpec: interchange failed: %s"), *E.ToString());
+    return MakeResponse(false, TEXT(""), E.ToString());
   }
+  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: stage 2/5 interchange ok"));
 
-  
-
-  
-
-  
+  FBuildSKOutputs SkOut;
+  if (FStageError E = RunStage_BuildSK(Norm, Spec, SkOut); !E.IsOk())
   {
-    UObject* NewBPObj2 = UEditorAssetLibrary::LoadAsset(BPPath);
-    if (UBlueprint* NewBP2 = Cast<UBlueprint>(NewBPObj2))
-    {
-      bool bChanged = false;
-      if (UBlueprintGeneratedClass* GenClass =
-              Cast<UBlueprintGeneratedClass>(NewBP2->GeneratedClass))
-      {
-        if (AActor* CDO = Cast<AActor>(GenClass->GetDefaultObject()))
-        {
-          if (CDO->SpawnCollisionHandlingMethod !=
-              ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn)
-          {
-            CDO->SpawnCollisionHandlingMethod =
-                ESpawnActorCollisionHandlingMethod::AdjustIfPossibleButAlwaysSpawn;
-            bChanged = true;
-            UE_LOG(LogCarlaTools, Display,
-                   TEXT("VI.SpawnSafety: forced AdjustIfPossibleButAlwaysSpawn on %s"),
-                   *NewBP2->GetName());
-          }
-        }
-      }
-      if (bChanged)
-      {
-
-        
-
-        NewBP2->Modify();
-        if (UPackage* Pkg = NewBP2->GetOutermost()) Pkg->MarkPackageDirty();
-      }
-    }
+    UE_LOG(LogCarlaTools, Warning, TEXT("VI.ProcessSpec: build SK failed: %s"), *E.ToString());
+    return MakeResponse(false, TEXT(""), E.ToString());
   }
+  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: stage 3/5 build SK ok"));
 
-  
-
-  
-#if ENGINE_MAJOR_VERSION >= 5
+  FBuildBPInputs BpIn;
+  BpIn.BodyMesh  = IcOut.BodyMesh;
+  BpIn.SkelMesh  = SkOut.SkelMesh;
+  BpIn.PhysAsset = SkOut.PhysAsset;
+  FBuildBPOutputs BpOut;
+  if (FStageError E = RunStage_BuildBP(Norm, Spec, BpIn, BpOut); !E.IsOk())
   {
-    auto FixWheelDefaults =
-        [&](const FString& WheelBpPath, float Radius, float Width)
-    {
-      UObject* WObj = UEditorAssetLibrary::LoadAsset(WheelBpPath);
-      UBlueprint* WBP = Cast<UBlueprint>(WObj);
-      if (!WBP || !WBP->GeneratedClass) return;
-      UChaosVehicleWheel* WCDO =
-          WBP->GeneratedClass->GetDefaultObject<UChaosVehicleWheel>();
-      if (!WCDO) return;
-      bool bChanged = false;
-      const float SafeR = Radius > 1.f ? Radius : 33.f;
-      const float SafeW = Width  > 1.f ? Width  : 22.f;
-      if (WCDO->WheelRadius < 1.f) { WCDO->WheelRadius = SafeR; bChanged = true; }
-      if (WCDO->WheelWidth  < 1.f) { WCDO->WheelWidth  = SafeW; bChanged = true; }
-      if (bChanged)
-      {
-        WBP->Modify();
-        if (UPackage* Pkg = WBP->GetOutermost()) Pkg->MarkPackageDirty();
-        UE_LOG(LogCarlaTools, Display,
-               TEXT("VI.SpawnSafety: wheel %s defaults R=%.1f W=%.1f"),
-               *WBP->GetName(), SafeR, SafeW);
-      }
-    };
-    FixWheelDefaults(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_FLW")),
-                     Spec.WheelFL.Radius, Spec.WheelFL.Width);
-    FixWheelDefaults(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_FRW")),
-                     Spec.WheelFR.Radius, Spec.WheelFR.Width);
-    FixWheelDefaults(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_RLW")),
-                     Spec.WheelRL.Radius, Spec.WheelRL.Width);
-    FixWheelDefaults(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_RRW")),
-                     Spec.WheelRR.Radius, Spec.WheelRR.Width);
+    UE_LOG(LogCarlaTools, Warning, TEXT("VI.ProcessSpec: build BP failed: %s"), *E.ToString());
+    return MakeResponse(false, TEXT(""), E.ToString());
   }
-#endif
+  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: stage 4/5 build BP ok (%s)"), *BpOut.BPPath);
 
-  
-
-  
-  
-  TArray<FString> ToSave;
-  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_body")));
-  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_FLW")));
-  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_FRW")));
-  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_RLW")));
-  ToSave.Add(VehicleContentPath / (Spec.VehicleName + TEXT("_Wheel_RRW")));
-  ToSave.Add(BPPath);
-  if (!NewPAPath.IsEmpty()) ToSave.Add(NewPAPath);
-  for (const FString& P : ShrunkShapePaths) ToSave.Add(P);
-  int32 Saved = 0;
-  for (const FString& Path : ToSave)
+  FPersistInputs PIn;
+  PIn.VehicleContentPath    = Norm.VehicleContentPath;
+  PIn.VehicleName           = Norm.VehicleName;
+  PIn.BPPath                = BpOut.BPPath;
+  PIn.PhysAssetPath         = BpOut.PhysAssetPath;
+  PIn.WheelBPPaths          = BpOut.WheelBPPaths;
+  PIn.ShrunkWheelShapePaths = BpOut.ShrunkWheelShapePaths;
+  FPersistOutputs POut;
+  if (FStageError E = RunStage_Persist(PIn, POut); !E.IsOk())
   {
-    if (UEditorAssetLibrary::SaveAsset(Path, false))
-      ++Saved;
-    else
-      UE_LOG(LogCarlaTools, Warning, TEXT("VI.ProcessSpec: SaveAsset failed for %s"), *Path);
+    UE_LOG(LogCarlaTools, Warning, TEXT("VI.ProcessSpec: persist failed: %s"), *E.ToString());
+    return MakeResponse(false, TEXT(""), E.ToString());
   }
-  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: persisted %d/%d assets to disk"),
-         Saved, ToSave.Num());
+  UE_LOG(LogCarlaTools, Display, TEXT("VI.ProcessSpec: stage 5/5 persist ok (%d/%d)"),
+         POut.SavedCount, POut.RequestedCount);
 
-  return MakeResponse(true, BPPath, TEXT(""));
+  return MakeResponse(true, BpOut.BPPath, TEXT(""));
 }
 
 

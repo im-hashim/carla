@@ -39,6 +39,8 @@
 #include "Factories/BlueprintFactory.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "BlueprintEditor.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"
 #include "UObject/SavePackage.h"
 #include "Misc/PackageName.h"
@@ -493,27 +495,9 @@ AActor* UUSDImporterWidget::GenerateNewVehicleBlueprint(
 
   
 
-  if (!bBodyComponentMatched && VehicleMeshes.Body)
-  {
-    UStaticMeshComponent* BodyComp = NewObject<UStaticMeshComponent>(
-        TemplateActor, UStaticMeshComponent::StaticClass(),
-        FName(TEXT("Body")));
-    BodyComp->SetStaticMesh(VehicleMeshes.Body);
-    BodyComp->SetRelativeLocation(FVector::ZeroVector);
-    BodyComp->SetCollisionProfileName(FName(TEXT("NoCollision")));
-    BodyComp->SetMobility(EComponentMobility::Movable);
-    BodyComp->SetVisibility(true);
-    BodyComp->SetHiddenInGame(false);
-    if (USceneComponent* Root = TemplateActor->GetRootComponent())
-    {
-      BodyComp->SetupAttachment(Root);
-    }
-    BodyComp->RegisterComponent();
-    TemplateActor->AddInstanceComponent(BodyComp);
-    UE_LOG(LogCarlaTools, Display,
-           TEXT("VI.GenerateBP: added Body StaticMeshComponent referencing %s"),
-           *VehicleMeshes.Body->GetName());
-  }
+  // Body StaticMeshComponent will be added via SCS_Node AFTER CreateBlueprintFromActor.
+  // AddInstanceComponent on the template actor does not reliably persist into the BP
+  // when the parent class (e.g. BaseVehiclePawnNW) exposes no body slot in its CDO.
 
   // Get the skeletal mesh and modify it to match the vehicle parameters
   USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(
@@ -720,9 +704,41 @@ AActor* UUSDImporterWidget::GenerateNewVehicleBlueprint(
       TemplateActor,
       Params);
 
+  if (NewBP && !bBodyComponentMatched && VehicleMeshes.Body && NewBP->SimpleConstructionScript)
+  {
+    USimpleConstructionScript* SCS = NewBP->SimpleConstructionScript;
+    USCS_Node* BodyNode = SCS->CreateNode(UStaticMeshComponent::StaticClass(), FName(TEXT("Body")));
+    if (BodyNode)
+    {
+      if (UStaticMeshComponent* BodyTpl = Cast<UStaticMeshComponent>(BodyNode->ComponentTemplate))
+      {
+        BodyTpl->SetStaticMesh(VehicleMeshes.Body);
+        BodyTpl->SetCollisionProfileName(FName(TEXT("NoCollision")));
+        BodyTpl->SetMobility(EComponentMobility::Movable);
+        BodyTpl->SetVisibility(true);
+        BodyTpl->SetHiddenInGame(false);
+        BodyTpl->SetRelativeLocation(FVector::ZeroVector);
+      }
+      USCS_Node* SkelNode = nullptr;
+      for (USCS_Node* N : SCS->GetAllNodes())
+      {
+        if (N && N->ComponentTemplate && N->ComponentTemplate->IsA<USkeletalMeshComponent>())
+        {
+          SkelNode = N; break;
+        }
+      }
+      if (SkelNode) SkelNode->AddChildNode(BodyNode);
+      else SCS->AddNode(BodyNode);
 
-  
-  
+      FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(NewBP);
+      FKismetEditorUtilities::CompileBlueprint(NewBP);
+      UE_LOG(LogCarlaTools, Display,
+             TEXT("VI.GenerateBP: added Body via SCS_Node referencing %s (parent=%s)"),
+             *VehicleMeshes.Body->GetName(),
+             SkelNode ? *SkelNode->GetVariableName().ToString() : TEXT("root"));
+    }
+  }
+
   if (NewBP)
   {
     if (UPackage* Pkg = NewBP->GetOutermost())

@@ -53,6 +53,7 @@ class VehicleImportPage : public QWidget {
   void onBrowse();
   void onImport();
   void onDrop();
+  void onExport();
   void onBuildKit();
   void onBrowseEnginePath();
   void onBrowseUproject();
@@ -93,7 +94,9 @@ class VehicleImportPage : public QWidget {
   QDoubleSpinBox  *mBrakeSpin          = nullptr;
   QLabel          *mUeStatusLabel      = nullptr;
   QPushButton     *mImportBtn          = nullptr;
+  QPushButton     *mCalibrateBtn       = nullptr;
   QPushButton     *mDropBtn            = nullptr;
+  QPushButton     *mExportBtn          = nullptr;
   QPushButton     *mBuildKitBtn        = nullptr;
   QLabel          *mModeBanner         = nullptr;
   QProgressBar    *mProgress           = nullptr;

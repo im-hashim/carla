@@ -53,6 +53,10 @@ struct VehicleSpec {
   int   upAxis      = 2;
   int   forwardAxis = 0;
 
+  float adjustYawDeg  = 0.0f;
+  float adjustMirrorX = 1.0f;
+  float adjustMirrorY = 1.0f;
+
   std::array<WheelSpec, 4> wheels {};
 
   float chassisXMin = 0, chassisXMax = 0;

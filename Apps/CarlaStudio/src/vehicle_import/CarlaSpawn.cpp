@@ -30,6 +30,7 @@
 #include <carla/client/ActorList.h>
 #include <carla/geom/Transform.h>
 #include <chrono>
+#include <thread>
 #include <stdexcept>
 #endif
 
@@ -388,15 +389,54 @@ SpawnResult spawnInRunningCarla(const QString &make, const QString &model) {
                               .arg(make.toLower(), model.toLower()).toStdString();
     auto bp = bps->Find(id);
     if (!bp) {
-      // No ReloadWorld here — that call can destabilize a running CARLA mid-tick
-      // (we saw the simulator crash + Studio crash from it). Tell the user to
-      // restart CARLA themselves so it picks up the new VehicleParameters.json
-      // entry on its next world load.
-      sr.kind   = SpawnResult::Kind::BlueprintNotFound;
-      sr.detail = QString("Blueprint '%1' not in CARLA's library — restart CARLA via Studio's "
-                          "STOP+START so it re-reads VehicleParameters.json.")
-                    .arg(QString::fromStdString(id));
-      return sr;
+      // First-pass library lookup missed — the deploy added the entry but the
+      // running sim cached its blueprint library at world load. Try one
+      // ReloadWorld to force a re-read of VehicleParameters.json without
+      // restarting CARLA. Wrapped in try/catch because a prior attempt (in
+      // some libcarla / sim version combos) destabilised the sim — if that
+      // happens here, surface BlueprintNotFound so Studio can fall back to a
+      // STOP+START.
+      bool reloadAttempted = false;
+      bool reloadOk        = false;
+      try {
+        client.ReloadWorld();
+        reloadAttempted = true;
+        // Re-fetch world + library after reload, with one short retry to let
+        // the sim finish its post-load handshake.
+        for (int tries = 0; tries < 6; ++tries) {
+          try {
+            world = client.GetWorld();
+            bps   = world.GetBlueprintLibrary();
+            bp    = bps->Find(id);
+            if (bp) { reloadOk = true; break; }
+          } catch (...) {
+            // Sim still settling — wait a bit and retry.
+          }
+          std::this_thread::sleep_for(std::chrono::milliseconds(1500));
+        }
+      } catch (const std::exception &e) {
+        sr.kind   = SpawnResult::Kind::BlueprintNotFound;
+        sr.detail = QString("Blueprint '%1' not in library; ReloadWorld threw: %2 — "
+                            "restart CARLA via Studio's STOP+START so it re-reads "
+                            "VehicleParameters.json.")
+                      .arg(QString::fromStdString(id),
+                           QString::fromUtf8(e.what()));
+        return sr;
+      } catch (...) {
+        sr.kind   = SpawnResult::Kind::BlueprintNotFound;
+        sr.detail = QString("Blueprint '%1' not in library; ReloadWorld threw a non-std "
+                            "exception — restart CARLA via Studio's STOP+START.")
+                      .arg(QString::fromStdString(id));
+        return sr;
+      }
+      if (!reloadOk) {
+        sr.kind   = SpawnResult::Kind::BlueprintNotFound;
+        sr.detail = QString("Blueprint '%1' still not in library after ReloadWorld%2 — "
+                            "restart CARLA via Studio's STOP+START.")
+                      .arg(QString::fromStdString(id),
+                           reloadAttempted ? " + 6 retries" : "");
+        return sr;
+      }
     }
     auto map        = world.GetMap();
     auto transforms = map->GetRecommendedSpawnPoints();
