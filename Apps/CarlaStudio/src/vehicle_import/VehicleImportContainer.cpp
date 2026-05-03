@@ -34,17 +34,6 @@ VehicleImportContainer::VehicleImportContainer(EditorBinaryResolver findEditor,
                                     std::move(findUproject),
                                     std::move(findCarlaRoot),
                                     std::move(requestStartCarla), this);
-  // Single visible tab: the import flow. The other former sub-tabs were folded
-  // into the import flow itself — see notes below — so the tab bar collapses
-  // to the one operation the user actually performs.
-  //
-  //   Convert *.blend > *.obj  ─► auto-runs from Browse handlers when the
-  //                               selected file is .blend (silent).
-  //   Pre-built Package        ─► installable via the Visualize backend; log
-  //                               line at the end of visualization shows the
-  //                               archive location.
-  //   Preview                  ─► pops out into VehiclePreviewWindow
-  //                               automatically on import success.
   mTabs->addTab(mFromMesh, "From 3D Model");
   mTabs->tabBar()->hide();   // single tab — no need for a tab bar
   layout->addWidget(mTabs);

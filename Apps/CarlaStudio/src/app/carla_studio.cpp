@@ -3226,9 +3226,6 @@ int main(int argc, char *argv[]) {
         return open;
       };
 
-      // Combined probe: TCP check → fresh cc::Client → GetServerVersion().
-      // Creates a new cc::Client on each TCP-success to guarantee a live
-      // rpclib socket. The successful client is promoted to inAppDriveClient.
       auto rpcReadyProbe = [&, last_err = std::string()]() mutable -> bool {
         if (!tcpOpen()) return false;
         auto candidate = std::make_shared<cc::Client>(hostStr, static_cast<uint16_t>(port));
@@ -3252,10 +3249,6 @@ int main(int argc, char *argv[]) {
         }
       };
 
-      // Probe loop: retry until probe() succeeds OR the user presses STOP.
-      // max_seconds > 0 adds a hard timeout for post-load checks; 0 = unlimited.
-      // Sleep is broken into 50 ms event-processing slices so the UI stays
-      // responsive and STOP takes effect within ~50 ms.
       auto waitFor = [&](const char *label,
                          const std::function<bool()> &probe,
                          int max_seconds = 0) -> bool {
@@ -3285,8 +3278,6 @@ int main(int argc, char *argv[]) {
             setSimulationStatus(QString("Running (connecting… %1 s)")
                                   .arg(qint64(elapsed)));
           }
-          // 5 × 50 ms = 250 ms sleep, but processEvents each slice so STOP
-          // button clicks are dispatched and launchRequestedOrRunning updates.
           for (int i = 0; i < 5 && launchRequestedOrRunning; ++i) {
             QApplication::processEvents(QEventLoop::AllEvents, 50);
           }
@@ -3295,14 +3286,11 @@ int main(int argc, char *argv[]) {
         return false;
       };
 
-      // Retry until STOP is pressed (max_seconds=0 → unlimited).
       if (!waitFor("rpc-ready", rpcReadyProbe)) {
         setSimulationStatus("Idle");
         return false;
       }
-      // inAppDriveClient is now set by rpcReadyProbe.
 
-      // Post-load world probe used after GenerateOpenDriveWorld / LoadWorld.
       auto worldQueryable = [&]() -> bool {
         try {
           auto world = inAppDriveClient->GetWorld();
@@ -3310,10 +3298,6 @@ int main(int argc, char *argv[]) {
         } catch (...) { return false; }
       };
 
-      // -------- Honour the Map dropdown selection ----------------------
-      // "Basic" → bundled 10-mile two-lane OpenDRIVE via
-      //           GenerateOpenDriveWorld() (heavy RPC, up to ~60 s).
-      // "Town*" → standard CARLA umap via LoadWorld(town).
       const QString chosenMap = scenarioName.trimmed();
       const bool wantMinimal =
           chosenMap.compare("Basic", Qt::CaseInsensitive) == 0 ||
@@ -3332,10 +3316,7 @@ int main(int argc, char *argv[]) {
               carla::rpc::OpendriveGenerationParameters params;
               params.vertex_distance = 5.0;
               params.max_road_length = 500.0;
-              // 1.5 m wall at both outer shoulder edges — acts as guard-rail fence
               params.wall_height = 1.5;
-              // 50 m each side of centreline gives a stable physics ground plane
-              // without triggering UE5 RecastNavMesh tile-build crashes.
               params.additional_width = 50.0;
               params.smooth_junctions = true;
               params.enable_mesh_visibility = true;
@@ -3358,7 +3339,6 @@ int main(int argc, char *argv[]) {
           }
         }
       } else if (!chosenMap.isEmpty()) {
-        // LoadWorld() picks the umap by short name (Town01, Town10HD, etc).
         inAppDriveClient->SetTimeout(std::chrono::seconds(120));
         try {
           setSimulationStatus(QString("Running (loading %1)").arg(chosenMap));
@@ -3373,11 +3353,6 @@ int main(int argc, char *argv[]) {
 
       auto world = inAppDriveClient->GetWorld();
 
-      // Each step below runs on the GUI thread and can throw via the RPC.
-      // Wrap each in its own try/catch with stderr logging so a failure
-      // localizes instead of bubbling up as an opaque "std::exception"
-      // through the outer catch (which has bitten us repeatedly with the
-      // InMemoryMap cache build on generated-OpenDRIVE worlds).
       carla::SharedPtr<cc::ActorList> actors;
       try {
         std::cerr << "[in-app driver] step: GetActors\n";
@@ -3410,9 +3385,6 @@ int main(int argc, char *argv[]) {
           return false;
         }
 
-        // Spawn-point selection.
-        //   • Basic map (procedural OpenDRIVE): SKIP GetRecommendedSpawnPoints()
-        //     because libcarla's InMemoryMap build for our 16 km straight
         
         
         
@@ -11441,8 +11413,11 @@ int main(int argc, char *argv[]) {
   auto findCarlaRootForPkg = [&]() -> QString {
     return carlaRootPath ? carlaRootPath->text().trimmed() : QString();
   };
+  auto requestStartCarlaForPkg = [startBtn]() {
+    if (startBtn && startBtn->isEnabled()) startBtn->click();
+  };
   auto *vehicleImportContainer = new carla_studio::vehicle_import::VehicleImportContainer(
-      findUnrealEditorBin, findVehicleUproject, findCarlaRootForPkg);
+      findUnrealEditorBin, findVehicleUproject, findCarlaRootForPkg, requestStartCarlaForPkg);
   vehicleImportContainer->setVisible(false);
   bool vehicleImportTabVisible = false;
   auto setVehicleImportTabVisible = [&, vehicleImportContainer, vehicleIcon](bool on) {
@@ -11453,19 +11428,12 @@ int main(int argc, char *argv[]) {
       const int idx = tabs->addTab(vehicleImportContainer, vehicleIcon, QString());
       tabs->setTabToolTip(idx, "Vehicle Import");
       tabs->setCurrentIndex(idx);
-      if (auto *pkg = vehicleImportContainer->prebuiltPage()) pkg->refreshDestination();
     } else {
       const int idx = tabs->indexOf(vehicleImportContainer);
       if (idx >= 0) tabs->removeTab(idx);
       vehicleImportContainer->setVisible(false);
     }
   };
-  if (carlaRootPath) {
-    QObject::connect(carlaRootPath, &QLineEdit::textChanged,
-        vehicleImportContainer, [vehicleImportContainer](const QString &) {
-          if (auto *pkg = vehicleImportContainer->prebuiltPage()) pkg->refreshDestination();
-        });
-  }
   const int loggingTabIndex = -1;
   Q_UNUSED(loggingIcon);
 

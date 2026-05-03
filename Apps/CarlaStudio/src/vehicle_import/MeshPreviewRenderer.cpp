@@ -21,9 +21,6 @@ namespace carla_studio::vehicle_import {
 
 namespace {
 
-// Cars in the wild come in metres, centimetres, or millimetres. Use the
-// longest extent to guess the scale that puts the result in the 200-800 cm
-// range (typical car length 3-7 m).
 void detectUnits(float maxExt, float &scaleToCm, QString &units)
 {
   if (maxExt >= 50.f && maxExt <= 1000.f)         { scaleToCm = 1.0f;   units = "cm"; }
@@ -86,7 +83,6 @@ PreviewSummary analyseMesh(const MeshGeometry &g)
   s.volumeM3 = (s.extCm[0] * s.extCm[1] * s.extCm[2]) / 1.0e6f;
   s.sizeClass = classify(s.volumeM3);
 
-  // Forward axis = longest extent. Sign = +ve if more vertices ahead of centroid.
   s.forwardAxis = (ext[0] >= ext[1] && ext[0] >= ext[2]) ? 0
                 : (ext[1] >= ext[2]) ? 1 : 2;
   const float ctr[3] = { 0.5f*(minV[0]+maxV[0]), 0.5f*(minV[1]+maxV[1]), 0.5f*(minV[2]+maxV[2]) };
@@ -111,7 +107,6 @@ QImage renderPreview(const MeshGeometry &g,
   p.setRenderHint(QPainter::Antialiasing, true);
   p.setRenderHint(QPainter::TextAntialiasing, true);
 
-  // World extent shown in the frame, in cm.
   const float halfCm = std::max({
       std::fabs(sum.extCm[0]) * 0.6f + 100.f,
       std::fabs(sum.extCm[1]) * 0.6f + 100.f,
@@ -126,7 +121,6 @@ QImage renderPreview(const MeshGeometry &g,
                    center.y() - wy * pxPerCm);  // y inverted
   };
 
-  // Checkerboard floor: 1 cell = 100 cm = 1 m.
   const float cellCm = 100.f;
   const int cells = static_cast<int>(std::ceil(halfCm / cellCm)) + 1;
   for (int i = -cells; i < cells; ++i) {
@@ -139,7 +133,6 @@ QImage renderPreview(const MeshGeometry &g,
       p.fillRect(rect, c);
     }
   }
-  // Grid lines + origin cross
   p.setPen(QPen(QColor(190, 190, 195), 1));
   for (int i = -cells; i <= cells; ++i) {
     QPointF h0 = worldToImg(-cells * cellCm, i * cellCm);
@@ -153,14 +146,12 @@ QImage renderPreview(const MeshGeometry &g,
   p.drawLine(worldToImg(-halfCm, 0), worldToImg(halfCm, 0));
   p.drawLine(worldToImg(0, -halfCm), worldToImg(0, halfCm));
 
-  // Project mesh vertices onto the chosen plane.
   int hAxis, vAxis;
   char hLab, vLab;
   axesFor(view, hAxis, vAxis, hLab, vLab);
 
   p.setPen(QColor(40, 90, 160, 160));
   const int nV = g.vertexCount();
-  // Stride to keep render fast on huge meshes.
   const int stride = std::max(1, nV / 8000);
   for (int i = 0; i < nV; i += stride) {
     float x, y, z; g.vertex(i, x, y, z);
@@ -169,7 +160,6 @@ QImage renderPreview(const MeshGeometry &g,
     p.drawPoint(q);
   }
 
-  // Axis arrows: red=+X, green=+Y, blue=+Z. Draw whichever two appear in this view.
   auto drawArrow = [&](char which, const QColor &col) {
     int axis = (which == 'X') ? 0 : (which == 'Y') ? 1 : 2;
     const float len = halfCm * 0.55f;
@@ -181,7 +171,6 @@ QImage renderPreview(const MeshGeometry &g,
     QPointF base = center;
     p.setPen(QPen(col, 3));
     p.drawLine(base, tip);
-    // arrowhead
     QPointF dir = tip - base;
     const float L = std::hypot(dir.x(), dir.y());
     if (L > 1e-3) {
@@ -200,7 +189,6 @@ QImage renderPreview(const MeshGeometry &g,
   drawArrow('Y', QColor( 60, 200,  60));
   drawArrow('Z', QColor( 80, 130, 255));
 
-  // Forward indicator (arrow on the chosen forward axis with sign).
   {
     int fa = sum.forwardAxis;
     if (fa == hAxis || fa == vAxis) {
@@ -217,7 +205,6 @@ QImage renderPreview(const MeshGeometry &g,
     }
   }
 
-  // Wheel markers (only meaningful in the TOP view for car wheel layout).
   if (wheels.set && view == PreviewView::Top) {
     const QVector3D pts[4] = { wheels.fl, wheels.fr, wheels.rl, wheels.rr };
     const QColor cols[4] = { QColor(255,200,0), QColor(255,120,0),
@@ -233,7 +220,6 @@ QImage renderPreview(const MeshGeometry &g,
     }
   }
 
-  // Header banner: view name + summary line
   p.setPen(QColor(20, 20, 20));
   QFont h = p.font(); h.setBold(true); h.setPointSize(12); p.setFont(h);
   p.fillRect(QRectF(0, 0, pixels, 28), QColor(245, 245, 245, 230));

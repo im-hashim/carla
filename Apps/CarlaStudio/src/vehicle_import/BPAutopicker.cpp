@@ -14,10 +14,6 @@
 namespace carla_studio::vehicle_import {
 
 QString pickClosestBaseVehicleBP(float /*lengthCm*/) {
-  // Production vehicle BPs (Sprinter, Tesla, Charger…) are static-mesh rigs:
-  // they have no USkeletalMesh + UPhysicsAsset that the importer can inherit.
-  // BaseUSDImportVehicle is the only stock CARLA BP shaped right for the
-  // importer to clone, so always recommend it regardless of vehicle length.
   return QStringLiteral("/Game/Carla/Blueprints/USDImportTemplates/BaseUSDImportVehicle");
 }
 

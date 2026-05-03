@@ -141,12 +141,6 @@ PreflightOutcome runImporterPreflight(const QString             &uproject,
   if (log) log(QString("Preflight: BuildIds %1 — %2").arg(buildIdsOk ? "aligned" : "MISMATCHED", buildIdReport));
   if (log) log(QString("Preflight: listener symbol in CarlaTools.so — %1").arg(soOk ? "present" : "MISSING"));
 
-  // Non-destructive policy: never trigger Build.sh from inside Studio. UE
-  // rebuilds are heavy, error-prone, and gate-block the user. Studio's job
-  // here is to *report* what's wrong so the user can fix it (or run the
-  // CLI rebuild themselves), then proceed to launch the editor with what's
-  // on disk. The editor will surface its own load-time errors if a plugin
-  // truly can't be loaded.
   if (out.sourceWritten || out.moduleHookPatched) {
     if (log) log("Preflight: importer source files were updated on disk. The currently-installed "
                  "CarlaTools.so may be stale — if Import hangs, run the rebuild manually:");

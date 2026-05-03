@@ -13,10 +13,6 @@
 
 namespace carla_studio::vehicle_import {
 
-// Default port; runtime-overridable via env CARLA_VEHICLE_IMPORTER_PORT so
-// the offline test rig can run on a non-clashing port while Studio stays on
-// the default. Use importerPort() at call time, not the constant — keep the
-// constant for headers/messages only.
 inline constexpr int kImporterPort = 18583;
 int importerPort();
 

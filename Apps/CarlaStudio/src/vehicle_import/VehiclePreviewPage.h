@@ -38,7 +38,6 @@ class VehiclePreviewPage : public QWidget {
                            const QVector3D &rl, const QVector3D &rr);
   void resetCamera();
 
-  // View / adjustment toolbar slots — see CalibrationToolbar in the .cpp.
   void viewTop();
   void viewSide();
   void viewFront();
@@ -73,8 +72,6 @@ class VehiclePreviewPage : public QWidget {
   void updateMeshBounds();
   void applyAdjustment(const QString &label);  // logs to info box
 
-  // Preview-only transform state (composed with the auto-recenter from
-  // updateMeshBounds). Affects the displayed mesh, NOT the cooked import.
   float mAdjustYawDeg = 0.f;
   float mAdjustMirrorX = 1.f;
   float mAdjustMirrorY = 1.f;

@@ -6,14 +6,6 @@
 // <https://www.gnu.org/licenses/agpl-3.0.html> for the full text.
 // SPDX-License-Identifier: AGPL-3.0-or-later
 //
-// Standalone calibration CLI: load a vehicle mesh, render top/side/front PNGs
-// on the calibration grid, print a JSON summary of orientation + size class.
-// Used for regression-free pre-import inspection from the terminal — same
-// rendering core as the in-Studio Preview tab (MeshPreviewRenderer).
-//
-// Usage:
-//   carla-studio-vehicle-preview <mesh-path> [<out-dir>]
-// Default out-dir: /tmp/vehicle_preview/<basename>/
 
 #include "MeshPreviewRenderer.h"
 #include "MeshGeometry.h"

@@ -23,7 +23,6 @@ namespace carla_studio::vehicle_import {
 
 namespace {
 
-// Scan the OBJ once to compute vertex AABB. Returns false if no v lines found.
 bool scanBounds(const QString &path,
                 float &xMin, float &xMax,
                 float &yMin, float &yMax,
@@ -52,7 +51,6 @@ bool scanBounds(const QString &path,
   return any;
 }
 
-// Co-locate .mtl + texture files from the source dir next to the output OBJ.
 void colocateMaterials(const QString &srcDir, const QString &dstDir) {
   static const QStringList kFilters = {
     "*.mtl", "*.png", "*.jpg", "*.jpeg", "*.tga", "*.bmp", "*.dds"

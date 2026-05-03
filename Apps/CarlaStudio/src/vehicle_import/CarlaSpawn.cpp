@@ -49,7 +49,6 @@ QString classPathFor(const QString &bpAssetPath) {
 }
 
 QString contentSubpathForBp(const QString &bpAssetPath) {
-  // "/Game/Carla/Static/Vehicles/4Wheeled/Foo/BP_Foo" → "Carla/Static/Vehicles/4Wheeled/Foo"
   QString p = bpAssetPath;
   if (p.startsWith("/Game/")) p.remove(0, QString("/Game/").size());
   const int lastSlash = p.lastIndexOf('/');
@@ -57,9 +56,6 @@ QString contentSubpathForBp(const QString &bpAssetPath) {
 }
 
 QString shippingContentRoot(const QString &shippingCarlaRoot) {
-  // Shipping CARLA layouts we have to support:
-  //   <root>/CarlaUnreal/Content/...      (CARLA 0.10.0 packaged)
-  //   <root>/CarlaUE5/Content/...         (older naming)
   for (const QString &mid : { QStringLiteral("CarlaUnreal"), QStringLiteral("CarlaUE5") }) {
     const QString candidate = shippingCarlaRoot + "/" + mid + "/Content";
     if (QFileInfo(candidate).isDir()) return candidate;
@@ -112,7 +108,11 @@ bool appendVehicleToConfig(const QString &configPath, const QString &classPath,
   bool replaced = false;
   for (const QJsonValue &v : vehicles) {
     const QJsonObject o = v.toObject();
-    if (o.value("Model").toString() == model || o.value("Class").toString() == classPath) {
+    auto get = [&](const char *upper, const char *lower) {
+      const QString u = o.value(upper).toString();
+      return u.isEmpty() ? o.value(lower).toString() : u;
+    };
+    if (get("Model","model") == model || get("Class","class") == classPath) {
       replaced = true;
       continue;
     }
@@ -120,16 +120,14 @@ bool appendVehicleToConfig(const QString &configPath, const QString &classPath,
   }
 
   QJsonObject entry;
-  entry["Make"]              = make;
+  entry["Make"]              = make.toLower();
   entry["Model"]             = model;
   entry["Class"]             = classPath;
   entry["NumberOfWheels"]    = numWheels;
   entry["Generation"]        = 2;
-  entry["ObjectType"]        = QString();
   entry["BaseType"]          = "car";
-  entry["SpecialType"]       = QString();
   entry["HasDynamicDoors"]   = false;
-  entry["HasLights"]         = false;
+  entry["HasLights"]         = true;
   entry["RecommendedColors"] = QJsonArray();
   entry["SupportedDrivers"]  = QJsonArray();
   kept.append(entry);
@@ -202,13 +200,6 @@ RegisterResult registerVehicleInJson(const VehicleRegistration &reg) {
 
 namespace {
 
-// CARLA shipping releases ship with pre-cooked stock vehicles only. Anything
-// imported via CarlaStudio inherits from BaseUSDImportVehicle (in
-// /Game/Carla/Blueprints/USDImportTemplates) — and that directory is NOT
-// part of any release. Without it deployed, the imported BP's parent class
-// fails to load in shipping and TrySpawnActor returns null at every spawn
-// point. Cook + copy the templates dir once per shipping install; subsequent
-// imports skip this step (cheap mtime check).
 bool ensureUSDImportTemplatesDeployed(const QString &dstContent,
                                       const QString &editorBinary,
                                       const QString &uprojectPath,
@@ -340,10 +331,6 @@ DeployResult deployVehicleToShippingCarla(const VehicleRegistration &reg) {
     d.detail = QString("No .uasset files found under %1 — Import probably did not save to disk.").arg(srcDir);
     return d;
   }
-  // Hard requirement: the BP itself must be among the copied files. If only
-  // the body/wheels were saved (because the BP-save bug didn't persist it),
-  // CARLA will fail at spawn time with a confusing class-not-found error.
-  // Catch it here with an actionable message instead.
   const QString bpName = QFileInfo(reg.bpAssetPath).fileName();
   const QString bpFile = dstDir + "/" + bpName + ".uasset";
   if (!QFileInfo(bpFile).isFile()) {
@@ -372,15 +359,17 @@ DeployResult deployVehicleToShippingCarla(const VehicleRegistration &reg) {
   return d;
 }
 
-SpawnResult spawnInRunningCarla(const QString &make, const QString &model) {
+SpawnResult spawnInRunningCarla(const QString &make, const QString &model,
+                                const QString &host, int port) {
   SpawnResult sr;
 #ifndef CARLA_STUDIO_WITH_LIBCARLA
+  (void)host; (void)port;
   sr.kind   = SpawnResult::Kind::Failed;
   sr.detail = "Studio was built without LibCarla.";
   return sr;
 #else
   try {
-    auto client = carla::client::Client("localhost", 2000);
+    auto client = carla::client::Client(host.toStdString(), port);
     client.SetTimeout(std::chrono::seconds(60));
     client.GetServerVersion();
     auto world  = client.GetWorld();
@@ -389,20 +378,11 @@ SpawnResult spawnInRunningCarla(const QString &make, const QString &model) {
                               .arg(make.toLower(), model.toLower()).toStdString();
     auto bp = bps->Find(id);
     if (!bp) {
-      // First-pass library lookup missed — the deploy added the entry but the
-      // running sim cached its blueprint library at world load. Try one
-      // ReloadWorld to force a re-read of VehicleParameters.json without
-      // restarting CARLA. Wrapped in try/catch because a prior attempt (in
-      // some libcarla / sim version combos) destabilised the sim — if that
-      // happens here, surface BlueprintNotFound so Studio can fall back to a
-      // STOP+START.
       bool reloadAttempted = false;
       bool reloadOk        = false;
       try {
         client.ReloadWorld();
         reloadAttempted = true;
-        // Re-fetch world + library after reload, with one short retry to let
-        // the sim finish its post-load handshake.
         for (int tries = 0; tries < 6; ++tries) {
           try {
             world = client.GetWorld();
@@ -410,7 +390,6 @@ SpawnResult spawnInRunningCarla(const QString &make, const QString &model) {
             bp    = bps->Find(id);
             if (bp) { reloadOk = true; break; }
           } catch (...) {
-            // Sim still settling — wait a bit and retry.
           }
           std::this_thread::sleep_for(std::chrono::milliseconds(1500));
         }
@@ -446,16 +425,8 @@ SpawnResult spawnInRunningCarla(const QString &make, const QString &model) {
       return sr;
     }
 
-    // Clear the stage by *moving* existing vehicles far away rather than
-    // destroying them. Studio's in-app driver holds long-lived references
-    // to the actors it spawned (the Charger at (50, -1.75, 0.5)) and ticks
-    // against them periodically — destroying them out from under that code
-    // throws from an RPC path we don't own. Moving them keeps their handles
-    // valid; the imported vehicle gets the freed spawn point.
     int moved = 0;
     auto allActors = world.GetActors();
-    // Park well below the ground so any post-teleport physics tick lets the
-    // car fall freely into the void instead of bouncing on the ground plane.
     const carla::geom::Transform parking(
         carla::geom::Location(-1000.0f, -1000.0f, -1000.0f),
         carla::geom::Rotation());
@@ -464,8 +435,6 @@ SpawnResult spawnInRunningCarla(const QString &make, const QString &model) {
       if (!a) continue;
       const std::string tid = a->GetTypeId();
       if (tid.rfind("vehicle.", 0) == 0) {
-        // Disable autopilot + physics first so the teleport doesn't
-        // trigger the chassis-bounce wobble on relocation.
         if (auto v = std::dynamic_pointer_cast<carla::client::Vehicle>(a)) {
           v->SetAutopilot(false);
         }
@@ -518,13 +487,10 @@ SpawnResult spawnInRunningCarla(const QString &make, const QString &model) {
     return sr;
   } catch (const std::exception &e) {
     sr.kind   = SpawnResult::Kind::NoSimulator;
-    sr.detail = QString("CARLA RPC unreachable on localhost:2000 — start CARLA via Studio's "
-                        "START button. (%1)").arg(QString::fromUtf8(e.what()));
+    sr.detail = QString("CARLA RPC unreachable on %1:%2 — start CARLA via Studio's "
+                        "START button. (%3)").arg(host).arg(port).arg(QString::fromUtf8(e.what()));
     return sr;
   } catch (...) {
-    // Some LibCarla / boost paths throw types that aren't derived from
-    // std::exception. Without this catch they'd escape the worker thread
-    // and propagate to Studio's event loop → fatal handler.
     sr.kind   = SpawnResult::Kind::Failed;
     sr.detail = "Unknown exception during LibCarla spawn — check that the running CARLA "
                 "simulator's API version matches the libcarla-client this Studio was built "

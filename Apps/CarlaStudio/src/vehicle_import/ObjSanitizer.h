@@ -21,12 +21,6 @@ struct SanitizeReport {
   float   zLiftCm      = 0.0f;
 };
 
-// Auto-mode (scaleToCm <= 0): two-pass heuristic — scale to fit ~250cm largest
-// extent if input is in meters or normalized units, rotate so longest horizontal
-// axis becomes +X (UE forward), translate so min-Z = 0 (wheels on ground).
-// Explicit-mode (scaleToCm > 0): scale only, no rotate or lift (legacy compat).
-// Always co-locates any .mtl + texture files from the source directory next
-// to the output OBJ so UE Interchange can resolve mtllib references.
 SanitizeReport sanitizeOBJ(const QString &inputPath, float scaleToCm);
 
 }  // namespace carla_studio::vehicle_import

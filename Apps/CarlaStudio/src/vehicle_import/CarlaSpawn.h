@@ -47,6 +47,8 @@ struct SpawnResult {
   QString detail;
 };
 
-SpawnResult spawnInRunningCarla(const QString &make, const QString &model);
+SpawnResult spawnInRunningCarla(const QString &make, const QString &model,
+                                const QString &host = QStringLiteral("localhost"),
+                                int port = 2000);
 
 }  // namespace carla_studio::vehicle_import

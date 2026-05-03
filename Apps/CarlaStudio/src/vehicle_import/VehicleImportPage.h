@@ -60,6 +60,7 @@ class VehicleImportPage : public QWidget {
   void onBrowseWheels();
   void refreshModeBanner();
   void refreshSourceIndicators();
+  void refreshDepCheckRow();
   void recomputeMergedSpec();
   void applyDisabledStateStyling();
   QString resolvedEditorBinary() const;
@@ -111,6 +112,7 @@ class VehicleImportPage : public QWidget {
   std::shared_ptr<VehicleSpec> mDetectedSpec = std::make_shared<VehicleSpec>();
   std::shared_ptr<ImportMode>  mActiveMode   = std::make_shared<ImportMode>(ImportMode::Lite);
   QLabel                  *mDetectionLabel  = nullptr;
+  QLabel                  *mDepCheckLabel   = nullptr;
 };
 
 }  // namespace carla_studio::vehicle_import

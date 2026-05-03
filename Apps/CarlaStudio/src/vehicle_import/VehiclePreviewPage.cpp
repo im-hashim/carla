@@ -98,8 +98,6 @@ Qt3DCore::QEntity *makeAxis(Qt3DCore::QEntity *parent,
   mat->setSpecular(QColor(255, 255, 255));
   mat->setShininess(20.0f);
   auto *t = new Qt3DCore::QTransform();
-  // Cylinder default axis is Y. Rotate so the cylinder lies along axisCm and
-  // translate so its base sits at origin (cylinder mesh is centered).
   const QVector3D dir = axisCm.normalized();
   const QVector3D yUp(0, 1, 0);
   const QVector3D rotAxis = QVector3D::crossProduct(yUp, dir);
@@ -114,8 +112,6 @@ Qt3DCore::QEntity *makeAxis(Qt3DCore::QEntity *parent,
   return e;
 }
 
-// Draw a thin "rod" along a horizontal edge from a→b at z height. Rod is a
-// short cylinder oriented along the edge direction.
 Qt3DCore::QEntity *makeRodXY(Qt3DCore::QEntity *parent,
                              const QVector3D &a, const QVector3D &b,
                              float radius, const QColor &color)
@@ -132,7 +128,6 @@ Qt3DCore::QEntity *makeRodXY(Qt3DCore::QEntity *parent,
   mat->setDiffuse(color);
   mat->setAmbient(color);
   auto *t = new Qt3DCore::QTransform();
-  // Rotate cylinder (default Y-axis aligned) to direction d.
   if (L > 1e-3f) {
     const QVector3D dir = d / L;
     const QVector3D yUp(0, 1, 0);
@@ -151,8 +146,6 @@ Qt3DCore::QEntity *makeRodXY(Qt3DCore::QEntity *parent,
   return e;
 }
 
-// Stencil rectangle at ground level: front/rear/left/right edges as thin rods.
-// halfL = half-length on Y axis, halfW = half-width on X axis.
 void makeStencilRect(Qt3DCore::QEntity *parent,
                      float halfW, float halfL, float zLift,
                      float radius, const QColor &color)
@@ -179,8 +172,6 @@ Qt3DCore::QEntity *makeCheckerCell(Qt3DCore::QEntity *parent,
   mat->setSpecular(QColor(40, 40, 40));
   mat->setShininess(2.0f);
   auto *t = new Qt3DCore::QTransform();
-  // QPlaneMesh lies in XZ plane by default, normal +Y.
-  // We want it in the XY plane (Z up) — rotate -90° around X.
   t->setRotationX(-90.0f);
   t->setTranslation(QVector3D(xCm + cellCm * 0.5f, yCm + cellCm * 0.5f, 0.0f));
   e->addComponent(m);
@@ -210,9 +201,6 @@ VehiclePreviewPage::VehiclePreviewPage(QWidget *parent) : QWidget(parent)
   topRow->addWidget(mResetCamBtn);
   outer->addLayout(topRow);
 
-  // Calibration toolbar: view modes + transform adjustments. All transforms
-  // are PREVIEW-ONLY (composed with the auto-recenter from updateMeshBounds);
-  // they do not modify the cooked vehicle that the plugin already produced.
   auto *toolbar = new QHBoxLayout();
   toolbar->setSpacing(4);
   auto addBtn = [&](const QString &label, const QString &tip,
@@ -260,8 +248,6 @@ VehiclePreviewPage::VehiclePreviewPage(QWidget *parent) : QWidget(parent)
   container->setFocusPolicy(Qt::StrongFocus);
   outer->addWidget(container, 1);
 
-  // Calibration status badge — overlay on the bottom-right of the viewport.
-  // Updated by updateMeshBounds() every time the mesh loads.
   mCalibrationBadge = new QLabel(container);
   mCalibrationBadge->setStyleSheet(
       "QLabel { background-color: rgba(20, 20, 20, 200); color: #DDDDDD; "
@@ -294,7 +280,6 @@ void VehiclePreviewPage::buildScene()
   mRoot = new Qt3DCore::QEntity();
   mView->setRootEntity(mRoot);
 
-  // Camera (Z up, looking from +X +Y +Z toward origin).
   auto *cam = mView->camera();
   cam->lens()->setPerspectiveProjection(45.0f, 16.0f / 9.0f, 1.0f, 50000.0f);
   cam->setUpVector(QVector3D(0, 0, 1));
@@ -306,8 +291,6 @@ void VehiclePreviewPage::buildScene()
   mCamCtl->setLinearSpeed(2000.0f);
   mCamCtl->setLookSpeed(180.0f);
 
-  // Sun light (directional) attached to the camera entity for headlight effect
-  // plus a stationary ambient-ish point light.
   auto *sun = new Qt3DRender::QDirectionalLight(mRoot);
   sun->setIntensity(0.8f);
   sun->setColor(QColor(255, 245, 230));
@@ -328,10 +311,6 @@ void VehiclePreviewPage::buildScene()
   buildReferenceOutlines(mRoot);
   buildWheelMarkers(mRoot);
 
-  // Mesh entity is rebuilt per-load (see loadMesh): we bypass QSceneLoader
-  // because the Qt6 sceneparsers plugin set isn't always present on the host;
-  // instead we feed verts/indices straight into a QGeometryRenderer built
-  // from MeshGeometry. mSceneLoader is left null and unused.
   mMeshEntity    = new Qt3DCore::QEntity(mRoot);
   mMeshTransform = new Qt3DCore::QTransform();
   mMeshEntity->addComponent(mMeshTransform);
@@ -358,13 +337,6 @@ void VehiclePreviewPage::buildAxisGizmo(Qt3DCore::QEntity *root, float lengthCm)
 
 void VehiclePreviewPage::buildReferenceOutlines(Qt3DCore::QEntity *root)
 {
-  // Four reference envelopes drawn at ground level (+0.6 cm so they sit above
-  // the checkerboard floor and read as overlay markings). Sizes cover every
-  // size_class the analyser produces:
-  //   kart        — half-W=0.30 m, half-L=0.85 m  → 0.60 × 1.70 m   (light blue)
-  //   sedan       — half-W=0.92 m, half-L=2.30 m  → 1.84 × 4.60 m   (green)
-  //   parking spot— half-W=1.25 m, half-L=2.50 m  → 2.50 × 5.00 m   (cyan)
-  //   truck       — half-W=1.25 m, half-L=3.00 m  → 2.50 × 6.00 m   (orange)
   const float zLift = 0.6f;
   makeStencilRect(root,  30.f,  85.f, zLift, 1.5f, QColor(170, 220, 255));
   makeStencilRect(root,  92.f, 230.f, zLift, 1.5f, QColor(120, 220, 130));
@@ -374,8 +346,6 @@ void VehiclePreviewPage::buildReferenceOutlines(Qt3DCore::QEntity *root)
 
 void VehiclePreviewPage::buildWheelMarkers(Qt3DCore::QEntity *root)
 {
-  // Tire footprint rectangles on the floor, ~25 cm × 18 cm each (typical
-  // sedan tire contact patch). Coloured per corner for unambiguous reading.
   const QColor colors[4] = { QColor(255,200,0), QColor(255,120,0),
                              QColor(0,200,255), QColor(0,120,255) };
   const QString labels[4] = { "FL","FR","RL","RR" };
@@ -399,8 +369,6 @@ void VehiclePreviewPage::buildWheelMarkers(Qt3DCore::QEntity *root)
   }
 }
 
-// Replace any existing renderer/material under mMeshEntity with a new pair
-// built from the supplied MeshGeometry. Returns true if rendererable.
 static bool installMeshGeometry(Qt3DCore::QEntity *meshEntity,
                                 Qt3DCore::QTransform *meshTransform,
                                 const carla_studio::vehicle_import::MeshGeometry &g)
@@ -410,7 +378,6 @@ static bool installMeshGeometry(Qt3DCore::QEntity *meshEntity,
   if (!meshEntity || !g.valid || g.vertexCount() == 0 || g.faceCount() == 0)
     return false;
 
-  // Wipe previous geometry components.
   const auto comps = meshEntity->components();
   for (auto *c : comps) {
     if (c == meshTransform) continue;
@@ -542,9 +509,6 @@ void VehiclePreviewPage::onSceneStatusChanged(int statusInt)
 
 void VehiclePreviewPage::updateMeshBounds()
 {
-  // Re-load via MeshGeometry helper to compute bounds + give the user a numeric
-  // summary independent of Qt3D's internal scene graph (which can be opaque
-  // when the source uses arbitrary units).
   const QString path = mPathEdit->text();
   MeshGeometry g = loadMeshGeometry(path);
   if (!g.valid) {
@@ -569,10 +533,6 @@ void VehiclePreviewPage::updateMeshBounds()
   else if (maxExt >= 2.f && maxExt <= 8.f)        { scaleHint = 100.0f; unitsHint = "m";  }
   else if (maxExt >= 2000.f && maxExt <= 8000.f)  { scaleHint = 0.1f;   unitsHint = "mm"; }
 
-  // Auto-rescale the displayed mesh to cm AND recenter X/Y on origin so it
-  // sits on the grid; pull Z so the BOTTOM of the bbox lands at Z=0 (road
-  // surface), not the centroid. This avoids the reference outlines slicing
-  // through the middle of the body.
   const float ctrCm[3] = {
       0.5f * (minV[0] + maxV[0]) * scaleHint,
       0.5f * (minV[1] + maxV[1]) * scaleHint,
@@ -588,15 +548,11 @@ void VehiclePreviewPage::updateMeshBounds()
     mMeshTransform->setRotation(q);
   }
 
-  // Auto-fit camera to the mesh size so the user always sees the vehicle
-  // regardless of how big or how off-center the source coordinates were.
   const float lenX = (maxV[0]-minV[0]) * scaleHint;
   const float lenY = (maxV[1]-minV[1]) * scaleHint;
   const float lenZ = (maxV[2]-minV[2]) * scaleHint;
   if (mView && mView->camera()) {
     const float maxExtCm = std::max({lenX, lenY, lenZ});
-    // Camera distance scales with mesh size so karts fill the frame instead
-    // of looking like specks inside a sedan-scale viewport.
     const float reach = std::max(250.0f, maxExtCm * 1.6f);
     auto *cam = mView->camera();
     cam->setUpVector(QVector3D(0, 0, 1));
@@ -604,16 +560,8 @@ void VehiclePreviewPage::updateMeshBounds()
     cam->setViewCenter(QVector3D(0, 0, maxExtCm * 0.25f));
   }
 
-  // Heuristic wheel markers from the recentered bbox: canonical convention
-  // is lateral=+X, forward=+Y, up=+Z, so front wheels are +Y and right
-  // wheels are +X. Place each at ~40% lateral, ~35% longitudinal, on the
-  // ground plane. This sidesteps Studio's pre-canonical spec wheel coords
-  // that don't match the post-canonicalize mesh frame.
   const float halfX = lenX * 0.5f;
   const float halfY = lenY * 0.5f;
-  // Pick the LONGER horizontal axis as forward (cars are longer than wide);
-  // if X happens to be longer than Y, the canonicalize step normally swaps
-  // them, but be defensive.
   const bool yIsForward = lenY >= lenX;
   const float fwdHalf = yIsForward ? halfY : halfX;
   const float latHalf = yIsForward ? halfX : halfY;
@@ -632,15 +580,11 @@ void VehiclePreviewPage::updateMeshBounds()
     }
     return p;
   };
-  // FL (-lat, +fwd), FR (+lat, +fwd), RL (-lat, -fwd), RR (+lat, -fwd)
   if (mWheelXforms[0]) mWheelXforms[0]->setTranslation(wheelAt(-1.f, +1.f));
   if (mWheelXforms[1]) mWheelXforms[1]->setTranslation(wheelAt(+1.f, +1.f));
   if (mWheelXforms[2]) mWheelXforms[2]->setTranslation(wheelAt(-1.f, -1.f));
   if (mWheelXforms[3]) mWheelXforms[3]->setTranslation(wheelAt(+1.f, -1.f));
 
-  // Calibration verdict: green if the canonical mesh sits in our expected
-  // shape (forward axis = Y dominant, Z is vertical = shortest), otherwise
-  // suggest the most likely fix.
   if (mCalibrationBadge) {
     QString text;
     QString bg;
@@ -681,8 +625,6 @@ void VehiclePreviewPage::updateMeshBounds()
       volM3 < 12.0f ? "sedan" :
       volM3 < 25.0f ? "suv" : "truck";
 
-  // Detect dominant forward axis: longest extent. Sign: +ve if more vertices
-  // sit at +axis end of the centroid.
   int fwdAxis = (ext[0] >= ext[1] && ext[0] >= ext[2]) ? 0
               : (ext[1] >= ext[2]) ? 1 : 2;
   const float ctr[3] = { 0.5f*(minV[0]+maxV[0]), 0.5f*(minV[1]+maxV[1]), 0.5f*(minV[2]+maxV[2]) };
@@ -708,7 +650,6 @@ void VehiclePreviewPage::updateMeshBounds()
   mInfoBox->setPlainText(info);
 }
 
-// ----- View toggles --------------------------------------------------------
 
 void VehiclePreviewPage::viewTop()
 {
@@ -744,18 +685,15 @@ void VehiclePreviewPage::view3D()
 
 void VehiclePreviewPage::fitCamera()
 {
-  // Re-runs the auto-fit code in updateMeshBounds.
   if (!mPathEdit->text().isEmpty()) updateMeshBounds();
 }
 
-// ----- Mesh adjustments (preview-only) -------------------------------------
 
 void VehiclePreviewPage::applyAdjustment(const QString &label)
 {
   if (mMeshTransform) {
     QQuaternion q = QQuaternion::fromAxisAndAngle(QVector3D(0, 0, 1), mAdjustYawDeg);
     mMeshTransform->setRotation(q);
-    // Compose mirror by negative scale on the chosen axis.
     mMeshTransform->setScale3D(QVector3D(mAdjustMirrorX, mAdjustMirrorY, 1.0f));
   }
   if (mInfoBox) {
@@ -775,7 +713,6 @@ void VehiclePreviewPage::mirrorY()       { mAdjustMirrorY *= -1.f; applyAdjustme
 
 void VehiclePreviewPage::recenterMesh()
 {
-  // Re-runs the auto-recenter logic in updateMeshBounds.
   if (!mPathEdit->text().isEmpty()) updateMeshBounds();
 }
 
