@@ -39,9 +39,7 @@ PrebuiltPackagePage::PrebuiltPackagePage(CarlaRootResolver findCarlaRoot,
   root->setSpacing(10);
 
   auto *banner = new QLabel(
-    "Installs a pre-cooked vehicle package (.uasset + .uexp) directly into your CARLA binary. "
-    "No Unreal Editor required — point to a community or marketplace folder and Studio "
-    "copies it into the right place.");
+    "Installs a pre-cooked vehicle (.uasset + .uexp) into your CARLA root (No Unreal Editor required)");
   banner->setWordWrap(true);
   banner->setStyleSheet("color: #555; font-size: 11px;");
   root->addWidget(banner);

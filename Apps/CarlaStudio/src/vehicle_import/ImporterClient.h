@@ -14,6 +14,7 @@
 namespace carla_studio::vehicle_import {
 
 inline constexpr int kImporterPort = 18583;
+int importerPort();
 
 bool       probeImporterPort();
 QString    sendJson(const QJsonObject &spec);

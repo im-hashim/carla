@@ -22,6 +22,11 @@
     <file alias="CITATION.cff">../CITATION.cff</file>
     <file alias="CONTRIBUTING.md">../CONTRIBUTING.md</file>
   </qresource>
+  <qresource prefix="/plugin_patches">
+    <file alias="CarlaTools/VehicleImporter.h">plugin_patches/CarlaTools/VehicleImporter.h</file>
+    <file alias="CarlaTools/VehicleImporter.cpp">plugin_patches/CarlaTools/VehicleImporter.cpp</file>
+    <file alias="CarlaTools/CarlaTools.cpp">plugin_patches/CarlaTools/CarlaTools.cpp</file>
+  </qresource>
   <qresource prefix="/integrations">
     <file alias="scripts/start.sh">integrations/scripts/start.sh</file>
     <file alias="scripts/stop.sh">integrations/scripts/stop.sh</file>

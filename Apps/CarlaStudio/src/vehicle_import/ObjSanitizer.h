@@ -16,6 +16,9 @@ struct SanitizeReport {
   QString outputPath;
   int     skippedFaceLines = 0;
   bool    ok = false;
+  float   appliedScale = 1.0f;
+  bool    swapXY       = false;
+  float   zLiftCm      = 0.0f;
 };
 
 SanitizeReport sanitizeOBJ(const QString &inputPath, float scaleToCm);

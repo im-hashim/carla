@@ -4,6 +4,13 @@
 #include "Carla/Vehicle/CarlaWheeledVehicle.h"
 #include "CarlaTools.h"
 
+#include <util/ue-header-guard-begin.h>
+#include "Runtime/Launch/Resources/Version.h"
+#include "ChaosVehicleMovementComponent.h"
+#include "ChaosWheeledVehicleMovementComponent.h"
+#include "ChaosVehicleWheel.h"
+#include <util/ue-header-guard-end.h>
+
 #ifdef WITH_OMNIVERSE
   #include "USDCARLAInterface.h"
 #endif
@@ -32,8 +39,11 @@
 #include "Factories/BlueprintFactory.h"
 #include "Kismet2/BlueprintEditorUtils.h"
 #include "BlueprintEditor.h"
+#include "Engine/SCS_Node.h"
+#include "Engine/SimpleConstructionScript.h"
 #include "PhysicsEngine/SkeletalBodySetup.h"
 #include "UObject/SavePackage.h"
+#include "Misc/PackageName.h"
 #include <util/ue-header-guard-end.h>
 
 #include <unordered_map>
@@ -460,6 +470,7 @@ AActor* UUSDImporterWidget::GenerateNewVehicleBlueprint(
   // Get an replace all static meshes with the appropiate mesh
   TArray<UStaticMeshComponent*> MeshComponents;
   TemplateActor->GetComponents(MeshComponents);
+  bool bBodyComponentMatched = false;
   for (UStaticMeshComponent* Component : MeshComponents)
   {
     std::string ComponentName = TCHAR_TO_UTF8(*Component->GetName());
@@ -470,10 +481,23 @@ AActor* UUSDImporterWidget::GenerateNewVehicleBlueprint(
     {
       Component->SetStaticMesh(ComponentMesh);
       Component->SetRelativeLocation(MeshLocation);
+      
+
+      Component->SetVisibility(true);
+      Component->SetHiddenInGame(false);
+      if (ComponentName == "Body") bBodyComponentMatched = true;
     }
     UE_LOG(LogCarlaTools, Log, TEXT("Component name %s, name %s"),
     *UKismetSystemLibrary::GetDisplayName(Component), *Component->GetName());
   }
+
+  
+
+  
+
+  // Body StaticMeshComponent will be added via SCS_Node AFTER CreateBlueprintFromActor.
+  // AddInstanceComponent on the template actor does not reliably persist into the BP
+  // when the parent class (e.g. BaseVehiclePawnNW) exposes no body slot in its CDO.
 
   // Get the skeletal mesh and modify it to match the vehicle parameters
   USkeletalMeshComponent* SkeletalMeshComponent = Cast<USkeletalMeshComponent>(
@@ -483,14 +507,15 @@ AActor* UUSDImporterWidget::GenerateNewVehicleBlueprint(
     UE_LOG(LogCarlaTools, Log, TEXT("Skeletal mesh component not found"));
     return nullptr;
   }
-  USkeletalMesh* SkeletalMesh = SkeletalMeshComponent->GetSkeletalMeshAsset();
+  
+
   TMap<FString, FTransform> NewBoneTransform = {
     {"Wheel_Front_Left", FTransform(VehicleMeshes.Anchors.WheelFL)},
     {"Wheel_Front_Right", FTransform(VehicleMeshes.Anchors.WheelFR)},
     {"Wheel_Rear_Right", FTransform(VehicleMeshes.Anchors.WheelRR)},
     {"Wheel_Rear_Left", FTransform(VehicleMeshes.Anchors.WheelRL)}
   };
-  if(!SkeletalMesh)
+  if(!NewSkeletalMesh)
   {
     UE_LOG(LogCarlaTools, Log, TEXT("Mesh not generated, skeletal mesh missing"));
     return nullptr;
@@ -502,6 +527,18 @@ AActor* UUSDImporterWidget::GenerateNewVehicleBlueprint(
     return nullptr;
   }
   SkeletalMeshComponent->SetSkeletalMesh(NewSkeletalMesh);
+  
+
+  SkeletalMeshComponent->SetMobility(EComponentMobility::Movable);
+  SkeletalMeshComponent->SetCollisionEnabled(ECollisionEnabled::QueryAndPhysics);
+  SkeletalMeshComponent->SetSimulatePhysics(true);
+
+  
+
+  
+
+  
+  SkeletalMeshComponent->SetAnimInstanceClass(nullptr);
   UE_LOG(LogCarlaTools, Log, TEXT("Num Lights %d"), VehicleMeshes.Lights.Num());
   for (const FVehicleLight& Light : VehicleMeshes.Lights)
   {
@@ -546,49 +583,111 @@ AActor* UUSDImporterWidget::GenerateNewVehicleBlueprint(
     TemplateActor->AddInstanceComponent(LightComponent);
     UE_LOG(LogCarlaTools, Log, TEXT("Spawn Light %s, %s, %s"), *Light.Name, *Light.Location.ToString(), *Light.Color.ToString());
   }
-  // set the wheel radius
-#if 0 // @CARLAUE5
-  UChaosVehicleWheel* WheelDefault;
-  WheelDefault = WheelTemplates.WheelFL->GetDefaultObject<UChaosVehicleWheel>();
-  WheelDefault->ShapeRadius = VehicleMeshes.WheelFL->GetBounds().SphereRadius;
-  WheelDefault = WheelTemplates.WheelFR->GetDefaultObject<UChaosVehicleWheel>();
-  WheelDefault->ShapeRadius = VehicleMeshes.WheelFR->GetBounds().SphereRadius;
-  WheelDefault = WheelTemplates.WheelRL->GetDefaultObject<UChaosVehicleWheel>();
-  WheelDefault->ShapeRadius = VehicleMeshes.WheelRL->GetBounds().SphereRadius;
-  WheelDefault = WheelTemplates.WheelRR->GetDefaultObject<UChaosVehicleWheel>();
-  WheelDefault->ShapeRadius = VehicleMeshes.WheelRR->GetBounds().SphereRadius;
-  // assign generated wheel types
-  TArray<FChaosWheelSetup> WheelSetups;
-  FChaosWheelSetup Setup;
-  Setup.WheelClass = WheelTemplates.WheelFL;
-  Setup.BoneName = "Wheel_Front_Left";
-  WheelSetups.Add(Setup);
-  Setup.WheelClass = WheelTemplates.WheelFR;
-  Setup.BoneName = "Wheel_Front_Right";
-  WheelSetups.Add(Setup);
-  Setup.WheelClass = WheelTemplates.WheelRL;
-  Setup.BoneName = "Wheel_Rear_Left";
-  WheelSetups.Add(Setup);
-  Setup.WheelClass = WheelTemplates.WheelRR;
-  Setup.BoneName = "Wheel_Rear_Right";
-  WheelSetups.Add(Setup);
+  
+
+  
   ACarlaWheeledVehicle* CarlaVehicle =
       Cast<ACarlaWheeledVehicle>(TemplateActor);
-  if(CarlaVehicle)
+  if (CarlaVehicle)
   {
+    auto FillSetups = [&](auto* Setups)
+    {
+      Setups->Empty();
+      const TPair<FName, TSubclassOf<UChaosVehicleWheel>> Wheels[4] = {
+        { FName(TEXT("Wheel_Front_Left")),  WheelTemplates.WheelFL },
+        { FName(TEXT("Wheel_Front_Right")), WheelTemplates.WheelFR },
+        { FName(TEXT("Wheel_Rear_Left")),   WheelTemplates.WheelRL },
+        { FName(TEXT("Wheel_Rear_Right")),  WheelTemplates.WheelRR },
+      };
+      for (const auto& W : Wheels)
+      {
+        FChaosWheelSetup Setup;
+        Setup.BoneName   = W.Key;
+        Setup.WheelClass = W.Value;
+        Setups->Add(Setup);
+      }
+    };
+#if ENGINE_MAJOR_VERSION >= 5
+    UChaosWheeledVehicleMovementComponent* MovementComponent =
+        CarlaVehicle->FindComponentByClass<UChaosWheeledVehicleMovementComponent>();
+    if (MovementComponent)
+    {
+      FillSetups(&MovementComponent->WheelSetups);
+      UE_LOG(LogCarlaTools, Display,
+             TEXT("VI.GenerateBP: WheelSetups populated with 4 wheel classes"));
+
+      float ChassisVolM3 = 0.f;
+      FVector ChassisExtentCm = FVector::ZeroVector;
+      FVector ChassisCenterCm = FVector::ZeroVector;
+      if (VehicleMeshes.Body)
+      {
+        const FBoxSphereBounds B = VehicleMeshes.Body->GetExtendedBounds();
+        ChassisExtentCm = B.BoxExtent * 2.f;
+        ChassisCenterCm = B.Origin;
+        ChassisVolM3 =
+            (ChassisExtentCm.X * ChassisExtentCm.Y * ChassisExtentCm.Z) / 1e6f;
+      }
+
+      float TunedMass = 1500.f;
+      bool bSmall = false;
+      if (ChassisVolM3 > 0.f && ChassisVolM3 < 0.5f)      { TunedMass = 50.f;  bSmall = true; }
+      else if (ChassisVolM3 > 0.f && ChassisVolM3 < 2.f)  { TunedMass = 200.f; }
+      MovementComponent->Mass = TunedMass;
+
+      
+      if (bSmall)
+      {
+        FRichCurve* RC = MovementComponent->EngineSetup.TorqueCurve.GetRichCurve();
+        if (RC)
+        {
+          RC->Reset();
+          RC->AddKey(0.f,    0.5f);
+          RC->AddKey(1500.f, 1.0f);
+          RC->AddKey(4500.f, 0.5f);
+        }
+        MovementComponent->EngineSetup.MaxTorque = 100.f;
+        MovementComponent->EngineSetup.MaxRPM    = 4500.f;
+      }
+
+      if (SkeletalMeshComponent && ChassisExtentCm != FVector::ZeroVector)
+      {
+        const FVector CoM(
+            ChassisCenterCm.X,
+            ChassisCenterCm.Y,
+            ChassisCenterCm.Z - ChassisExtentCm.Z * (1.f / 6.f));
+        SkeletalMeshComponent->BodyInstance.COMNudge = CoM;
+        SkeletalMeshComponent->BodyInstance.bOverrideMass = true;
+        SkeletalMeshComponent->BodyInstance.SetMassOverride(TunedMass, true);
+      }
+
+      UE_LOG(LogCarlaTools, Display,
+             TEXT("VI.GenerateBP: tuned mass=%.0fkg vol=%.3fm^3 small=%d CoMNudge=(%.1f,%.1f,%.1f)"),
+             TunedMass, ChassisVolM3, bSmall ? 1 : 0,
+             SkeletalMeshComponent ? SkeletalMeshComponent->BodyInstance.COMNudge.X : 0.f,
+             SkeletalMeshComponent ? SkeletalMeshComponent->BodyInstance.COMNudge.Y : 0.f,
+             SkeletalMeshComponent ? SkeletalMeshComponent->BodyInstance.COMNudge.Z : 0.f);
+    }
+    else
+    {
+      UE_LOG(LogCarlaTools, Warning,
+             TEXT("VI.GenerateBP: no UChaosWheeledVehicleMovementComponent on "
+                  "TemplateActor — WheelSetups not assigned, spawn will fail."));
+    }
+#else
     UWheeledVehicleMovementComponent4W* MovementComponent =
         Cast<UWheeledVehicleMovementComponent4W>(
             CarlaVehicle->GetVehicleMovementComponent());
-    MovementComponent->WheelSetups = WheelSetups;
+    if (MovementComponent)
+    {
+      FillSetups(&MovementComponent->WheelSetups);
+    }
+#endif
   }
   else
   {
-    UE_LOG(LogCarlaTools, Error, TEXT("Null CarlaVehicle"));
+    UE_LOG(LogCarlaTools, Error, TEXT("VI.GenerateBP: TemplateActor is not an "
+                                      "ACarlaWheeledVehicle — WheelSetups skipped."));
   }
-  // Set the vehicle collision in the new physicsasset object
-  GEditor->GetEditorSubsystem<UStaticMeshEditorSubsystem>()->AddSimpleCollisions(
-      VehicleMeshes.Body, EScriptingCollisionShapeType::NDOP26);
-#endif
 
   CopyCollisionToPhysicsAsset(NewPhysicsAsset, VehicleMeshes.Body);
   // assign the physics asset to the skeletal mesh
@@ -600,10 +699,68 @@ AActor* UUSDImporterWidget::GenerateNewVehicleBlueprint(
   Params.bDeferCompilation = false;
   Params.bOpenBlueprint = false;
   Params.ParentClassOverride = BaseClass;
-  FKismetEditorUtilities::CreateBlueprintFromActor(
+  UBlueprint* NewBP = FKismetEditorUtilities::CreateBlueprintFromActor(
       DestPath,
       TemplateActor,
       Params);
+
+  if (NewBP && !bBodyComponentMatched && VehicleMeshes.Body && NewBP->SimpleConstructionScript)
+  {
+    USimpleConstructionScript* SCS = NewBP->SimpleConstructionScript;
+    USCS_Node* BodyNode = SCS->CreateNode(UStaticMeshComponent::StaticClass(), FName(TEXT("Body")));
+    if (BodyNode)
+    {
+      if (UStaticMeshComponent* BodyTpl = Cast<UStaticMeshComponent>(BodyNode->ComponentTemplate))
+      {
+        BodyTpl->SetStaticMesh(VehicleMeshes.Body);
+        BodyTpl->SetCollisionProfileName(FName(TEXT("NoCollision")));
+        BodyTpl->SetMobility(EComponentMobility::Movable);
+        BodyTpl->SetVisibility(true);
+        BodyTpl->SetHiddenInGame(false);
+        BodyTpl->SetRelativeLocation(FVector::ZeroVector);
+      }
+      USCS_Node* SkelNode = nullptr;
+      for (USCS_Node* N : SCS->GetAllNodes())
+      {
+        if (N && N->ComponentTemplate && N->ComponentTemplate->IsA<USkeletalMeshComponent>())
+        {
+          SkelNode = N; break;
+        }
+      }
+      if (SkelNode) SkelNode->AddChildNode(BodyNode);
+      else SCS->AddNode(BodyNode);
+
+      FBlueprintEditorUtils::MarkBlueprintAsStructurallyModified(NewBP);
+      FKismetEditorUtilities::CompileBlueprint(NewBP);
+      UE_LOG(LogCarlaTools, Display,
+             TEXT("VI.GenerateBP: added Body via SCS_Node referencing %s (parent=%s)"),
+             *VehicleMeshes.Body->GetName(),
+             SkelNode ? *SkelNode->GetVariableName().ToString() : TEXT("root"));
+    }
+  }
+
+  if (NewBP)
+  {
+    if (UPackage* Pkg = NewBP->GetOutermost())
+    {
+      Pkg->SetDirtyFlag(true);
+      const FString FilePath = FPackageName::LongPackageNameToFilename(
+          Pkg->GetName(), FPackageName::GetAssetPackageExtension());
+      FSavePackageArgs SaveArgs;
+      SaveArgs.TopLevelFlags = RF_Public | RF_Standalone;
+      SaveArgs.SaveFlags     = SAVE_NoError;
+      SaveArgs.Error         = GError;
+      const bool bOk = UPackage::SavePackage(Pkg, NewBP, *FilePath, SaveArgs);
+      UE_LOG(LogCarlaTools, Display, TEXT("GenerateNewVehicleBlueprint: SavePackage(%s) -> %s"),
+             *FilePath, bOk ? TEXT("OK") : TEXT("FAILED"));
+    }
+  }
+  else
+  {
+    UE_LOG(LogCarlaTools, Warning,
+           TEXT("GenerateNewVehicleBlueprint: CreateBlueprintFromActor returned null for %s"),
+           *DestPath);
+  }
   return nullptr;
 }
 
@@ -641,8 +798,12 @@ bool UUSDImporterWidget::EditSkeletalMeshBones(
   SaveArgs.bWarnOfLongFilename = true;
   SaveArgs.SaveFlags = SAVE_NoError;
 
-  return UPackage::SavePackage(Package, NewSkeletalMesh, *(Package->GetName()),
-                               SaveArgs);
+  
+
+  
+  const FString FilePath = FPackageName::LongPackageNameToFilename(
+      Package->GetName(), FPackageName::GetAssetPackageExtension());
+  return UPackage::SavePackage(Package, NewSkeletalMesh, *FilePath, SaveArgs);
 }
 
 void UUSDImporterWidget::CopyCollisionToPhysicsAsset(
