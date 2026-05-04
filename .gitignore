@@ -1,0 +1,37 @@
+# Build artifacts
+Build/
+build/
+*.o
+*.a
+*.so
+*.dylib
+*.dll
+
+# IDE
+.vscode/
+.vs/
+.idea/
+cmake-build-*/
+*.swp
+*.swo
+
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+.venv/
+venv/
+
+# OS
+.DS_Store
+Thumbs.db
+
+# CMake
+CMakeCache.txt
+CMakeFiles/
+CMakeSettings.json
+
+# Qt
+*.pro.user
+moc_*.cpp
+ui_*.h
