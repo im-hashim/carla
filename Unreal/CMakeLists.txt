@@ -71,10 +71,6 @@ set (
   UE_DEPENDENCIES
   carla-server
   libsqlite3
-  Boost::asio
-  Boost::python
-  Boost::geometry
-  Boost::gil
   Eigen3::Eigen
   zlibstatic
   png_static
@@ -82,6 +78,14 @@ set (
 )
 
 set (UE_DEPENDENCIES_ORDER_ONLY ${UE_DEPENDENCIES})
+
+foreach (BOOST_COMPILED_TARGET
+    boost_date_time boost_serialization boost_filesystem
+    boost_thread boost_atomic boost_chrono boost_container)
+  if (TARGET ${BOOST_COMPILED_TARGET})
+    list (APPEND UE_DEPENDENCIES_ORDER_ONLY ${BOOST_COMPILED_TARGET})
+  endif ()
+endforeach ()
 
 if (BUILD_CARLA_CLIENT)
   list (APPEND UE_DEPENDENCIES_ORDER_ONLY carla-client)
@@ -146,6 +150,33 @@ foreach (UE_DEP ${UE_DEPENDENCIES})
     CARLA_UNREAL_INCLUDE_PATHS
     "$<TARGET_PROPERTY:${UE_DEP},INTERFACE_INCLUDE_DIRECTORIES>"
   )
+endforeach ()
+
+if (NOT DEFINED boost_SOURCE_DIR)
+  message (FATAL_ERROR "boost_SOURCE_DIR not set — Boost must be fetched via FetchContent before configuring Unreal.")
+endif ()
+
+file (GLOB BOOST_LIB_INCS "${boost_SOURCE_DIR}/libs/*/include")
+file (GLOB BOOST_NUMERIC_INCS "${boost_SOURCE_DIR}/libs/numeric/*/include")
+
+if (NOT BOOST_LIB_INCS)
+  message (FATAL_ERROR "Boost FetchContent appears incomplete — no libs/*/include dirs found. Delete Build/ and retry.")
+endif ()
+
+foreach (LIB asio config system geometry algorithm assert gil date_time)
+  if (NOT IS_DIRECTORY "${boost_SOURCE_DIR}/libs/${LIB}/include")
+    message (FATAL_ERROR "Required Boost component '${LIB}' missing — Delete Build/ and retry.")
+  endif ()
+endforeach ()
+
+if (NOT IS_DIRECTORY "${boost_SOURCE_DIR}/libs/numeric/conversion/include")
+  message (FATAL_ERROR "Required Boost component 'numeric/conversion' missing — Delete Build/ and retry.")
+endif ()
+
+foreach (INC ${BOOST_LIB_INCS} ${BOOST_NUMERIC_INCS})
+  if (IS_DIRECTORY "${INC}")
+    list (APPEND CARLA_UNREAL_INCLUDE_PATHS "${INC}")
+  endif ()
 endforeach ()
 
 set (
@@ -226,6 +257,19 @@ file (
   CONTENT
     "${CARLA_UNREAL_INCLUDE_PATHS}"
 )
+
+file (
+  REMOVE
+  ${CARLA_UE_PATH}/Intermediate/Build/BuildRules/CarlaUnrealModuleRulesManifest.json
+)
+
+file (GLOB UBT_STALE_PCH_FILES
+  "${CARLA_UE_PATH}/Intermediate/Build/*/*/CarlaUnreal/*/PCH.CarlaUnreal.h.gch"
+  "${CARLA_UE_PATH}/Intermediate/Build/*/*/CarlaUnreal/*/PCH.CarlaUnreal.h.gch.rsp"
+)
+if (UBT_STALE_PCH_FILES)
+  file (REMOVE ${UBT_STALE_PCH_FILES})
+endif ()
 
 file (
   GENERATE
