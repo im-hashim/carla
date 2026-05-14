@@ -14,6 +14,12 @@ carla_option (
   ON
 )
 
+carla_option (
+  CARLA_UNREAL_DDC_NO_ZEN_LOCAL_FALLBACK
+  "Pass -ddc=NoZenLocalFallback to UBT (recommended for CI to avoid Zen DDC timeouts)"
+  OFF
+)
+
 set (
   CARLA_UE_PATH
   ${CARLA_WORKSPACE_PATH}/Unreal/CarlaUnreal
@@ -371,6 +377,12 @@ file (
 
 
 
+if (CARLA_UNREAL_DDC_NO_ZEN_LOCAL_FALLBACK)
+  set (CARLA_UE_DDC_FLAG -ddc=NoZenLocalFallback)
+else ()
+  set (CARLA_UE_DDC_FLAG)
+endif ()
+
 carla_add_custom_target (
   carla-unreal
   "Build the CarlaUnreal subproject."
@@ -382,6 +394,7 @@ carla_add_custom_target (
     -project=${CARLA_UE_PROJECT_PATH}
     -game
     -buildscw
+    ${CARLA_UE_DDC_FLAG}
   USES_TERMINAL
   VERBATIM
 )
@@ -402,6 +415,7 @@ carla_add_custom_target (
     -project=${CARLA_UE_PROJECT_PATH}
     -game
     -buildscw
+    ${CARLA_UE_DDC_FLAG}
   DEPENDS
     ${CARLA_UNREAL_CONFIGURE_OUTPUTS}
   USES_TERMINAL
